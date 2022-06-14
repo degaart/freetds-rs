@@ -340,6 +340,21 @@ impl Command {
             }
         }
     }
+
+    pub fn res_info<T: Default>(&mut self, type_: CS_INT) -> Result<T> {
+        let mut buf: T = Default::default();
+        let mut out_len: CS_INT = Default::default();
+        unsafe {
+            let ret = ct_res_info(
+                self.handle,
+                type_,
+                mem::transmute(&mut buf),
+                mem::size_of::<T>() as i32,
+                &mut out_len);
+            ensure!(ret == CS_SUCCEED, "ct_res_info failed");
+        }
+        Ok(buf)
+    }
 }
 
 impl Drop for Command {
@@ -385,9 +400,12 @@ mod tests {
         conn.connect("***REMOVED***:2025").unwrap();
 
         let mut cmd = Command::new(&mut conn);
-        cmd.command(CS_LANG_CMD, CommandArg::String("select 'This is a string',getdate(),1, cast(3.14 as numeric(18,2)), 0x626162757368 as text
-
-        "), CS_UNUSED).unwrap();
+        cmd.command(
+            CS_LANG_CMD,
+            CommandArg::String(
+                "select 'This is a string',getdate(),1, cast(3.14 as numeric(18,2)), 0x626162757368 as text"),
+            CS_UNUSED)
+            .unwrap();
         cmd.send().unwrap();
 
         let mut binds: Vec<Bind> = Vec::new();
@@ -402,6 +420,9 @@ mod tests {
 
             match res_type {
                 CS_ROW_RESULT => {
+                    let cols: i32 = cmd.res_info(CS_NUMDATA).unwrap();
+                    println!("Columns: {}", cols);
+
                     binds[0].fmt.datatype = CS_CHAR_TYPE;
                     binds[0].fmt.format = CS_FMT_NULLTERM as i32;
                     binds[0].fmt.maxlength = 4096;
@@ -461,11 +482,15 @@ mod tests {
                             col4 = *col4_buf;
                         }
 
-                        println!("{:?}\n{:?}\n{:?}\n{:?}",
+                        let len5 = binds[4].data_length as usize;
+                        let col5 = String::from_utf8_lossy(&binds[4].buffer.as_slice()[0..len5]);
+
+                        println!("{:?}\n{:?}\n{:?}\n{:?}\n{:?}",
                                  col1,
                                  col2,
                                  col3,
-                                 col4);
+                                 col4,
+                                 col5);
                     }
                 },
                 CS_CMD_SUCCEED => {
