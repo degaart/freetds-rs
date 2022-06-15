@@ -166,6 +166,90 @@ impl Context {
         }
         CS_SUCCEED
     }
+
+    pub fn type_name(type_: i32) -> Option<&'static str> {
+        match type_ {
+            CS_CLIENTMSG_TYPE => Some("CS_CLIENTMSG_TYPE"),
+            CS_SERVERMSG_TYPE => Some("CS_SERVERMSG_TYPE"),
+            CS_ALLMSG_TYPE => Some("CS_ALLMSG_TYPE"),
+            CS_ILLEGAL_TYPE => Some("CS_ILLEGAL_TYPE"),
+            CS_CHAR_TYPE => Some("CS_CHAR_TYPE"),
+            CS_BINARY_TYPE => Some("CS_BINARY_TYPE"),
+            CS_LONGCHAR_TYPE => Some("CS_LONGCHAR_TYPE"),
+            CS_LONGBINARY_TYPE => Some("CS_LONGBINARY_TYPE"),
+            CS_TEXT_TYPE => Some("CS_TEXT_TYPE"),
+            CS_IMAGE_TYPE => Some("CS_IMAGE_TYPE"),
+            CS_TINYINT_TYPE => Some("CS_TINYINT_TYPE"),
+            CS_SMALLINT_TYPE => Some("CS_SMALLINT_TYPE"),
+            CS_INT_TYPE => Some("CS_INT_TYPE"),
+            CS_REAL_TYPE => Some("CS_REAL_TYPE"),
+            CS_FLOAT_TYPE => Some("CS_FLOAT_TYPE"),
+            CS_BIT_TYPE => Some("CS_BIT_TYPE"),
+            CS_DATETIME_TYPE => Some("CS_DATETIME_TYPE"),
+            CS_DATETIME4_TYPE => Some("CS_DATETIME4_TYPE"),
+            CS_MONEY_TYPE => Some("CS_MONEY_TYPE"),
+            CS_MONEY4_TYPE => Some("CS_MONEY4_TYPE"),
+            CS_NUMERIC_TYPE => Some("CS_NUMERIC_TYPE"),
+            CS_DECIMAL_TYPE => Some("CS_DECIMAL_TYPE"),
+            CS_VARCHAR_TYPE => Some("CS_VARCHAR_TYPE"),
+            CS_VARBINARY_TYPE => Some("CS_VARBINARY_TYPE"),
+            CS_LONG_TYPE => Some("CS_LONG_TYPE"),
+            CS_SENSITIVITY_TYPE => Some("CS_SENSITIVITY_TYPE"),
+            CS_BOUNDARY_TYPE => Some("CS_BOUNDARY_TYPE"),
+            CS_VOID_TYPE => Some("CS_VOID_TYPE"),
+            CS_USHORT_TYPE => Some("CS_USHORT_TYPE"),
+            CS_UNICHAR_TYPE => Some("CS_UNICHAR_TYPE"),
+            CS_BLOB_TYPE => Some("CS_BLOB_TYPE"),
+            CS_DATE_TYPE => Some("CS_DATE_TYPE"),
+            CS_TIME_TYPE => Some("CS_TIME_TYPE"),
+            CS_UNITEXT_TYPE => Some("CS_UNITEXT_TYPE"),
+            CS_BIGINT_TYPE => Some("CS_BIGINT_TYPE"),
+            CS_USMALLINT_TYPE => Some("CS_USMALLINT_TYPE"),
+            CS_UINT_TYPE => Some("CS_UINT_TYPE"),
+            CS_UBIGINT_TYPE => Some("CS_UBIGINT_TYPE"),
+            CS_XML_TYPE => Some("CS_XML_TYPE"),
+            CS_BIGDATETIME_TYPE => Some("CS_BIGDATETIME_TYPE"),
+            CS_BIGTIME_TYPE => Some("CS_BIGTIME_TYPE"),
+            CS_UNIQUE_TYPE => Some("CS_UNIQUE_TYPE"),
+            _ => None        
+        }
+    }
+
+    pub fn format_name(format: i32) -> Option<&'static str> {
+        match format as u32{
+            CS_FMT_UNUSED => Some("CS_FMT_UNUSED"),
+            CS_FMT_NULLTERM => Some("CS_FMT_NULLTERM"),
+            CS_FMT_PADNULL => Some("CS_FMT_PADNULL"),
+            CS_FMT_PADBLANK => Some("CS_FMT_PADBLANK"),
+            CS_FMT_JUSTIFY_RT => Some("CS_FMT_JUSTIFY_RT"),
+            _ => None
+        }
+    }
+
+    pub fn return_name(ret: i32) -> Option<&'static str> {
+        match ret {
+            CS_FAIL => Some("CS_FAIL"),
+            CS_MEM_ERROR => Some("CS_MEM_ERROR"),
+            CS_PENDING => Some("CS_PENDING"),
+            CS_QUIET => Some("CS_QUIET"),
+            CS_BUSY => Some("CS_BUSY"),
+            CS_INTERRUPT => Some("CS_INTERRUPT"),
+            CS_BLK_HAS_TEXT => Some("CS_BLK_HAS_TEXT"),
+            CS_CONTINUE => Some("CS_CONTINUE"),
+            CS_FATAL => Some("CS_FATAL"),
+            CS_RET_HAFAILOVER => Some("CS_RET_HAFAILOVER"),
+            CS_UNSUPPORTED => Some("CS_UNSUPPORTED"),
+            CS_CANCELED => Some("CS_CANCELED"),
+            CS_ROW_FAIL => Some("CS_ROW_FAIL"),
+            CS_END_DATA => Some("CS_END_DATA"),
+            CS_END_RESULTS => Some("CS_END_RESULTS"),
+            CS_END_ITEM => Some("CS_END_ITEM"),
+            CS_NOMSG => Some("CS_NOMSG"),
+            CS_TIMED_OUT => Some("CS_TIMED_OUT"),
+            _ => None
+        }
+    }
+
 }
  
 impl Drop for Context {
@@ -265,7 +349,6 @@ impl Drop for Connection {
         }
     }
 }
-
 pub struct Command {
     handle: *mut CS_COMMAND
 }
@@ -336,7 +419,7 @@ impl Command {
             } else if ret == CS_END_DATA {
                 Ok(false)
             } else {
-                Err(Error::new(ret, &format!("ct_fetch failed ({})", ret)))
+                Err(Error::new(ret, &format!("ct_fetch failed ({})", Context::return_name(ret).unwrap_or(&format!("{}", ret)))))
             }
         }
     }
@@ -352,6 +435,15 @@ impl Command {
                 mem::size_of::<T>() as i32,
                 &mut out_len);
             ensure!(ret == CS_SUCCEED, "ct_res_info failed");
+        }
+        Ok(buf)
+    }
+
+    pub fn describe(&mut self, item: i32) -> Result<CS_DATAFMT> {
+        let mut buf: CS_DATAFMT = Default::default();
+        unsafe {
+            let ret = ct_describe(self.handle, item, &mut buf);
+            ensure!(ret == CS_SUCCEED, "ct_describe failed");
         }
         Ok(buf)
     }
@@ -403,13 +495,12 @@ mod tests {
         cmd.command(
             CS_LANG_CMD,
             CommandArg::String(
-                "select 'This is a string',getdate(),1, cast(3.14 as numeric(18,2)), 0x626162757368 as text"),
+                "select 'This is a string' as col1, getdate(), 1, cast(3.14 as numeric(18,2)), 0x626162757368 as text"),
             CS_UNUSED)
             .unwrap();
         cmd.send().unwrap();
 
         let mut binds: Vec<Bind> = Vec::new();
-        binds.resize(5, Default::default());
         let mut ret;
         loop {
             let res_type;
@@ -421,76 +512,75 @@ mod tests {
             match res_type {
                 CS_ROW_RESULT => {
                     let cols: i32 = cmd.res_info(CS_NUMDATA).unwrap();
-                    println!("Columns: {}", cols);
+                    println!("Column count: {}", cols);
 
-                    binds[0].fmt.datatype = CS_CHAR_TYPE;
-                    binds[0].fmt.format = CS_FMT_NULLTERM as i32;
-                    binds[0].fmt.maxlength = 4096;
-                    binds[0].fmt.count = 1;
-                    binds[0].buffer.resize(4096, 0);
+                    binds.resize(cols as usize, Default::default());
+                    for col in 0..cols {
+                        /*
+                            bind.name for column alias
+                            bind.status & CS_CANBENULL
+                        */
+                        let bind = &mut binds[col as usize];
+                        bind.fmt = cmd.describe(col + 1).unwrap();
 
-                    binds[1].fmt.datatype = CS_DATETIME_TYPE;
-                    binds[1].fmt.count = 1;
-                    binds[1].buffer.resize(mem::size_of::<CS_DATETIME>(), 0);
+                        println!("col{}: {}", col, Context::type_name(bind.fmt.datatype).unwrap_or(""));
+                        bind.fmt.format = CS_FMT_UNUSED as i32;
+                        match bind.fmt.datatype {
+                            CS_CHAR_TYPE | CS_LONGCHAR_TYPE | CS_VARCHAR_TYPE | CS_UNICHAR_TYPE | CS_TEXT_TYPE | CS_UNITEXT_TYPE => {
+                                bind.fmt.maxlength += 1;
+                                bind.fmt.format = CS_FMT_NULLTERM as i32;
+                            },
+                            _ => {}
+                        }
+                        bind.buffer.resize(bind.fmt.maxlength as usize, 0);
+                        bind.fmt.count = 1;
 
-                    binds[2].fmt.datatype = CS_INT_TYPE;
-                    binds[2].fmt.count = 1;
-                    binds[2].buffer.resize(mem::size_of::<CS_INT>(), 0);
-
-                    binds[3].fmt.datatype = CS_NUMERIC_TYPE;
-                    binds[3].fmt.precision = CS_SRC_VALUE;
-                    binds[3].fmt.scale = CS_SRC_VALUE;
-                    binds[3].buffer.resize(mem::size_of::<CS_NUMERIC>(), 0);
-
-                    binds[4].fmt.datatype = CS_TEXT_TYPE;
-                    binds[4].fmt.format =  CS_FMT_NULLTERM as i32;
-                    binds[4].fmt.maxlength = 4096;
-                    binds[4].fmt.count = 1;
-                    binds[4].buffer.resize(4096, 0);
-
-                    for i in 0..binds.len() {
                         unsafe {
                             cmd.bind_unsafe(
-                                (i + 1) as i32,
-                                &mut binds[i].fmt,
-                                mem::transmute(binds[i].buffer.as_mut_ptr()),
-                                &mut binds[i].data_length,
-                                &mut binds[i].indicator)
+                                (col + 1) as i32,
+                                &mut bind.fmt,
+                                mem::transmute(bind.buffer.as_mut_ptr()),
+                                &mut bind.data_length,
+                                &mut bind.indicator)
                             .unwrap();
                         }
                     }
                                         
                     while cmd.fetch().unwrap() {
-                        let len1 = (binds[0].data_length as usize) - 1;
-                        let col1 = String::from_utf8_lossy(&binds[0].buffer.as_slice()[0..len1]);
-
-                        let col2: CS_DATETIME;
-                        unsafe {
-                            let col2_buf: *const CS_DATETIME = mem::transmute(binds[1].buffer.as_ptr());
-                            col2 = *col2_buf;
+                        for col in 0..cols {
+                            let bind = &binds[col as usize];
+                            match bind.fmt.datatype {
+                                CS_CHAR_TYPE | CS_LONGCHAR_TYPE | CS_VARCHAR_TYPE | CS_UNICHAR_TYPE | CS_TEXT_TYPE | CS_UNITEXT_TYPE => {
+                                    let len = (bind.data_length as usize) - 1;
+                                    let value = String::from_utf8_lossy(&bind.buffer.as_slice()[0..len]);
+                                    println!("{}: {:?}", col, value);
+                                },
+                                CS_DATETIME_TYPE => {
+                                    unsafe {
+                                        let buf: *const CS_DATETIME = mem::transmute(bind.buffer.as_ptr());
+                                        println!("{}: {:?}", col, *buf);
+                                    }
+                                },
+                                CS_INT_TYPE => {
+                                    unsafe {
+                                        let buf: *const CS_INT = mem::transmute(bind.buffer.as_ptr());
+                                        println!("{}: {:?}", col, *buf);
+                                    }
+                                },
+                                CS_NUMERIC_TYPE => {
+                                    unsafe {
+                                        let buf: *const CS_NUMERIC = mem::transmute(bind.buffer.as_ptr());
+                                        println!("{}: {:?}", col, *buf);
+                                    }
+                                },
+                                CS_BINARY_TYPE => {
+                                    println!("{}: {:?}", col, &bind.buffer.as_slice()[0..bind.data_length as usize]);
+                                },
+                                _ => {
+                                    panic!("{} not implemented", Context::type_name(bind.fmt.datatype).unwrap_or(""));
+                                }
+                            }
                         }
-
-                        let col3: i32;
-                        unsafe {
-                            let col3_buf: *const CS_INT = mem::transmute(binds[2].buffer.as_ptr());
-                            col3 = *col3_buf;
-                        }
-
-                        let col4: CS_NUMERIC;
-                        unsafe {
-                            let col4_buf: *const CS_NUMERIC = mem::transmute(binds[3].buffer.as_ptr());
-                            col4 = *col4_buf;
-                        }
-
-                        let len5 = binds[4].data_length as usize;
-                        let col5 = String::from_utf8_lossy(&binds[4].buffer.as_slice()[0..len5]);
-
-                        println!("{:?}\n{:?}\n{:?}\n{:?}\n{:?}",
-                                 col1,
-                                 col2,
-                                 col3,
-                                 col4,
-                                 col5);
                     }
                 },
                 CS_CMD_SUCCEED => {
