@@ -1,11 +1,9 @@
-use anyhow::bail;
-use anyhow::ensure;
 use freetds_sys::*;
 use std::ffi::CString;
 use std::fmt::Display;
 use std::ptr;
 use std::mem;
-use anyhow::Result;
+use std::fmt::Debug;
 
 extern "C" {
     #[allow(dead_code)]
@@ -14,22 +12,44 @@ extern "C" {
 
 #[derive(Debug, Clone)]
 pub struct Error {
-    code: i32,
+    code: Option<i32>,
+    fn_name: Option<String>,
     desc: String,
 }
 
 impl Error {
-    pub fn new(code: i32, desc: impl AsRef<str>) -> Self {
-        Self { code: code, desc: desc.as_ref().into() }
+    fn new(code: i32, fn_name: impl AsRef<str>) -> Self {
+        Self {
+            code: Some(code),
+            fn_name: Some(fn_name.as_ref().to_string()),
+            desc: format!("{} failed (ret: {})", fn_name.as_ref(), Context::return_name(code).unwrap_or(&format!("{}", code)))
+        }
     }
 
-    pub fn code(&self) -> i32 {
+    fn from_message(desc: impl AsRef<str>) -> Self {
+        Self {
+            code: None,
+            fn_name: None,
+            desc: desc.as_ref().into()
+        }
+    }
+
+    pub fn code(&self) -> Option<i32> {
         self.code
+    }
+
+    pub fn fn_name(&self) -> Option<&str> {
+        if let Some(s) = &self.fn_name {
+            Some(s)
+        } else {
+            None
+        }
     }
 
     pub fn desc(&self) -> &str {
         &self.desc
     }
+
 }
 
 impl Display for Error {
@@ -39,7 +59,42 @@ impl Display for Error {
 }
 
 impl std::error::Error for Error {
+
 }
+
+impl From<Box<dyn std::error::Error>> for Error {
+    fn from(e: Box<dyn std::error::Error>) -> Self {
+        Self::from_message(e.to_string())
+    }
+}
+
+impl From<std::ffi::NulError> for Error {
+    fn from(e: std::ffi::NulError) -> Self {
+        Self::from_message(e.to_string())
+    }
+}
+
+macro_rules! err {
+    ($code:ident, $fn_name:ident) => {
+        Err(Error::new($code, stringify!($fn_name)))
+    };
+    ($desc:literal) => {
+        Err(Error::from_message($desc))
+    };
+    ($desc:literal, $($arg:tt)*) => {
+        Err(Error::from_message(format!($desc, $($arg)*)))
+    };
+}
+
+macro_rules! succeeded {
+    ($code:ident, $fn_name:ident) => {
+        if $code != CS_SUCCEED {
+            return Err(Error::new($code, stringify!($fn_name)))
+        }
+    };
+}
+
+pub type Result<T, E = Error> = core::result::Result<T, E>;
 
 type CslibMsgCallbackType = extern "C" fn(*mut CS_CONTEXT, *const CS_CLIENTMSG) -> i32;
 type ClientMsgCallbackType = extern "C" fn(*mut CS_CONTEXT, *mut CS_CONNECTION, *const CS_CLIENTMSG) -> i32;
@@ -90,11 +145,11 @@ impl Context {
                     if ret == CS_SUCCEED {
                         return Ok(())
                     } else {
-                        bail!("cs_config failed");
+                        return err!(ret, cs_config);
                     }
                 },
                 _ => {
-                    bail!("Invalid argument");
+                    return err!("Invalid argument");
                 }
             }
         }
@@ -111,14 +166,14 @@ impl Context {
                     ret = ct_callback(self.handle, ptr::null_mut(), CS_SET, property, mem::transmute(&f));
                 },
                 _ => {
-                    bail!("Invalid argument");
+                    return err!("Invalid argument");
                 }
             }
 
             if ret == CS_SUCCEED {
                 return Ok(())
             } else {
-                bail!("ct_callback failed");
+                return err!(ret, ct_callback);
             }
         }
     }
@@ -250,6 +305,28 @@ impl Context {
         }
     }
 
+    pub fn convert(&mut self, srcfmt: &CS_DATAFMT, srcdata: &[u8], dstfmt: &CS_DATAFMT, dstdata: &mut [u8]) -> Result<usize> {
+        unsafe {
+            let mut dstlen: i32 = Default::default();
+            let ret = cs_convert(
+                self.handle,
+                mem::transmute(srcfmt as *const CS_DATAFMT),
+                mem::transmute(srcdata.as_ptr()),
+                mem::transmute(dstfmt as *const CS_DATAFMT),
+                mem::transmute(dstdata.as_mut_ptr()),
+                &mut dstlen);
+            if ret != CS_SUCCEED {
+                err!(ret, cs_convert)
+            } else {
+                Ok(dstlen as usize)
+            }
+        }
+    }
+
+    /*pub unsafe fn convert_unsafe(&mut self, srcfmt: &CS_DATAFMT, dstfmt: &CS_DATAFMT) -> Result<()> {
+        todo!();
+    }*/
+
 }
  
 impl Drop for Context {
@@ -268,12 +345,13 @@ impl Drop for Context {
     }
 }
 
-pub struct Connection {
-    handle: *mut CS_CONNECTION
+pub struct Connection<'a> {
+    ctx: &'a mut Context,
+    handle: *mut CS_CONNECTION,
 }
 
-impl Connection {
-    pub fn new(ctx: &mut Context) -> Self {
+impl<'a> Connection<'a> {
+    pub fn new(ctx: &'a mut Context) -> Self {
         unsafe {
             let mut conn: *mut CS_CONNECTION = ptr::null_mut();
             let ret = ct_con_alloc(ctx.handle, &mut conn);
@@ -281,7 +359,10 @@ impl Connection {
                 panic!("ct_con_alloc failed");
             }
 
-            Self { handle: conn }
+            Self {
+                ctx: ctx,
+                handle: conn
+            }
         }
     }
 
@@ -311,14 +392,14 @@ impl Connection {
                         &mut outlen);
                 },
                 _ => {
-                    bail!("Invalid argument");
+                    return err!("Invalid argument");
                 }
             }
 
             if ret == CS_SUCCEED {
-                return Ok(())
+                Ok(())
             } else {
-                bail!("ct_con_props failed");
+                err!("ct_con_props failed")
             }
         }
     }
@@ -331,15 +412,15 @@ impl Connection {
                 mem::transmute(server_name.as_ptr()),
                 CS_NULLTERM);
             if ret == CS_SUCCEED {
-                return Ok(())
+                Ok(())
             } else {
-                bail!("ct_connect failed");
+                err!("ct_connect failed")
             }
         }
     }
 }
 
-impl Drop for Connection {
+impl<'a> Drop for Connection<'_> {
     fn drop(&mut self) {
         unsafe {
             let ret = ct_con_drop(self.handle);
@@ -349,19 +430,24 @@ impl Drop for Connection {
         }
     }
 }
-pub struct Command {
+
+pub struct Command<'a> {
+    conn: &'a mut Connection<'a>,
     handle: *mut CS_COMMAND
 }
 
-impl Command {
-    pub fn new(conn: &Connection) -> Self {
+impl<'a> Command<'a> {
+    pub fn new(conn: &'a mut Connection<'a>) -> Self {
         unsafe {
             let mut cmd: *mut CS_COMMAND = ptr::null_mut();
             let ret = ct_cmd_alloc(conn.handle, &mut cmd);
             if ret != CS_SUCCEED {
                 panic!("ct_cmd_alloc failed");
             }
-            Self { handle: cmd }
+            Self {
+                conn: conn,
+                handle: cmd
+            }
         }
     }
 
@@ -377,11 +463,8 @@ impl Command {
                         mem::transmute(buffer.as_ptr()),
                         CS_NULLTERM,
                         option);
-                    ensure!(ret == CS_SUCCEED, "ct_command failed");
-                }/*,
-                _ => {
-                    bail!("Invalid argument");
-                }*/
+                    succeeded!(ret, ct_command);
+                }
             }
         }
         Ok(())
@@ -390,23 +473,26 @@ impl Command {
     pub fn send(&mut self) -> Result<()> {
         unsafe {
             let ret = ct_send(self.handle);
-            ensure!(ret == CS_SUCCEED, "ct_send failed");
+            succeeded!(ret, ct_send);
             Ok(())
         }
     }
 
-    pub fn results(&mut self) -> Result<(i32,i32)> {
+    pub fn results(&mut self) -> Result<(bool,i32), Error> {
         unsafe {
             let mut result_type: i32 = Default::default();
             let ret = ct_results(self.handle, &mut result_type);
-            ensure!(ret != CS_FAIL, "ct_results failed");
-            Ok((ret, result_type))
+            if ret != CS_SUCCEED && ret != CS_END_RESULTS {
+                err!(ret, ct_results)
+            } else {
+                Ok((ret == CS_SUCCEED, result_type))
+            }
         }
     }
 
     pub unsafe fn bind_unsafe(&mut self, item: i32, datafmt: *mut CS_DATAFMT, buffer: *mut CS_VOID, data_length: *mut i32, indicator: *mut i16) -> Result<()> {
         let ret = ct_bind(self.handle, item, datafmt, buffer, data_length, indicator);
-        ensure!(ret == CS_SUCCEED, "ct_bind failed");
+        succeeded!(ret, ct_bind);
         Ok(())
     }
 
@@ -419,7 +505,7 @@ impl Command {
             } else if ret == CS_END_DATA {
                 Ok(false)
             } else {
-                Err(Error::new(ret, &format!("ct_fetch failed ({})", Context::return_name(ret).unwrap_or(&format!("{}", ret)))))
+                err!(ret, ct_fetch)
             }
         }
     }
@@ -434,22 +520,31 @@ impl Command {
                 mem::transmute(&mut buf),
                 mem::size_of::<T>() as i32,
                 &mut out_len);
-            ensure!(ret == CS_SUCCEED, "ct_res_info failed");
+            succeeded!(ret, ct_res_info);
+            Ok(buf)
         }
-        Ok(buf)
     }
 
     pub fn describe(&mut self, item: i32) -> Result<CS_DATAFMT> {
         let mut buf: CS_DATAFMT = Default::default();
         unsafe {
             let ret = ct_describe(self.handle, item, &mut buf);
-            ensure!(ret == CS_SUCCEED, "ct_describe failed");
+            succeeded!(ret, ct_describe);
+            Ok(buf)
         }
-        Ok(buf)
     }
+
+    pub fn cancel(&mut self, type_: i32) -> Result<(), Error> {
+        unsafe {
+            let ret = ct_cancel(ptr::null_mut(), self.handle, type_);
+            succeeded!(ret, ct_cancel);
+            Ok(())
+        }
+    }
+
 }
 
-impl Drop for Command {
+impl<'a> Drop for Command<'_> {
     fn drop(&mut self) {
         unsafe {
             let ret = ct_cmd_drop(self.handle);
@@ -460,17 +555,171 @@ impl Drop for Command {
     }
 }
 
+#[derive(Debug, Clone, Default)]
+struct Bind {
+    fmt: CS_DATAFMT,
+    buffer: Vec<u8>,
+    data_length: i32,
+    indicator: i16
+}
+
+#[derive(PartialEq)]
+enum StatementState {
+    Invalid,
+    ResultsReady,
+    ResultSetDone,
+    Done,
+}
+
+pub struct Statement<'a> {
+    command: Command<'a>,
+    state: StatementState,
+    binds: Vec<Bind>,
+    has_errors: bool,
+}
+
+impl<'a> Statement<'a> {
+    pub fn new(conn: &'a mut Connection<'a>, text: impl AsRef<str>) -> Result<Statement<'a>, Error> {
+        let mut command = Command::new(conn);
+        command.command(CS_LANG_CMD, CommandArg::String(text.as_ref()), CS_UNUSED)?;
+        command.send()?;
+
+        let mut st = Self {
+            command: command,
+            state: StatementState::Invalid,
+            binds: Vec::new(),
+            has_errors: false
+        };
+        st.process_results()?;
+        if st.has_errors {
+            err!("An error occured while executing the statement")
+        } else {
+            Ok(st)
+        }
+    }
+
+    fn get_results(cmd: &mut Command, binds: &mut Vec<Bind>) -> Result<usize, Error> {
+        let cols: i32 = cmd
+            .res_info(CS_NUMDATA)
+            .unwrap();
+        binds.resize(cols as usize, Default::default());
+        for col in 0..cols {
+            /*
+                bind.name for column alias
+                bind.status & CS_CANBENULL
+            */
+            let bind = &mut binds[col as usize];
+            bind.fmt = cmd.describe(col + 1).unwrap();
+            bind.fmt.format = CS_FMT_UNUSED as i32;
+            match bind.fmt.datatype {
+                CS_CHAR_TYPE | CS_LONGCHAR_TYPE | CS_VARCHAR_TYPE | CS_UNICHAR_TYPE | CS_TEXT_TYPE | CS_UNITEXT_TYPE => {
+                    bind.fmt.maxlength += 1;
+                    bind.fmt.format = CS_FMT_NULLTERM as i32;
+                },
+                _ => {}
+            }
+            bind.buffer.resize(bind.fmt.maxlength as usize, 0);
+            bind.fmt.count = 1;
+
+            unsafe {
+                cmd.bind_unsafe(
+                    (col + 1) as i32,
+                    &mut bind.fmt,
+                    mem::transmute(bind.buffer.as_mut_ptr()),
+                    &mut bind.data_length,
+                    &mut bind.indicator)
+                .unwrap();
+            }
+        }
+        Ok(cols as usize)
+    }
+
+    fn process_results(&mut self) -> Result<(), Error> {
+        match self.state {
+            StatementState::ResultsReady => {
+                self.command.cancel(CS_CANCEL_CURRENT)?;
+            },
+            StatementState::Done => {
+                return Ok(())
+            },
+            _ => {}
+        }
+        loop {
+            let (ret, res_type) = self.command.results()?;
+            if ret {
+                match res_type {
+                    CS_ROW_RESULT => {
+                        self.state = StatementState::ResultsReady;
+                        Self::get_results(&mut self.command, &mut self.binds)?;
+                    },
+                    CS_COMPUTE_RESULT | CS_CURSOR_RESULT | CS_PARAM_RESULT | CS_STATUS_RESULT => {
+                        self.command.cancel(CS_CANCEL_CURRENT)?;
+                    },
+                    CS_CMD_DONE => {
+                        self.state = StatementState::Done;
+                    },
+                    CS_CMD_FAIL => {
+                        self.has_errors = true;
+                    },
+                    _ => {
+                        /* Do nothing, most notably, ignore CS_CMD_SUCCEED */
+                    }
+                }
+            } else {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn next(&mut self) -> Result<bool, Error> {
+        if self.state == StatementState::Done || self.state == StatementState::ResultSetDone {
+            return Ok(false)
+        } else if self.state == StatementState::Invalid {
+            return err!("Invalid statement state");
+        }
+        
+        let ret = self.command.fetch()?;
+        if !ret {
+            self.state = StatementState::ResultSetDone;
+            return Ok(false);
+        }
+        self.state = StatementState::ResultsReady;
+        return Ok(true);
+    }
+
+    pub fn get_string(&mut self, col: i32) -> Result<String> {
+        let bind = &self.binds[col as usize];
+        match bind.fmt.datatype {
+            CS_CHAR_TYPE | CS_LONGCHAR_TYPE | CS_VARCHAR_TYPE | CS_UNICHAR_TYPE | CS_TEXT_TYPE | CS_UNITEXT_TYPE => {
+                let len = (bind.data_length as usize) - 1;
+                let value = String::from_utf8_lossy(&bind.buffer.as_slice()[0..len]);
+                return Ok(value.to_string());
+            },
+            _ => {
+                let mut dstfmt: CS_DATAFMT = Default::default();
+                dstfmt.datatype = CS_CHAR_TYPE;
+                dstfmt.maxlength = if bind.fmt.maxlength < 200 { 100 } else { bind.fmt.maxlength * 2 };
+                dstfmt.format = CS_FMT_NULLTERM as i32;
+                dstfmt.count = 1;
+
+                let mut dstdata: Vec<u8> = Vec::new();
+                dstdata.resize(dstfmt.maxlength as usize, Default::default());
+                let dstlen = self.command.conn.ctx.convert(
+                    &bind.fmt, &bind.buffer,
+                    &dstfmt,
+                    &mut dstdata)?;
+
+                return Ok(String::from_utf8_lossy(&dstdata.as_slice()[0..dstlen]).to_string());
+            }
+        }
+    }
+
+}
+
 #[cfg(test)]
 mod tests {
     use crate::*;
-
-    #[derive(Debug, Clone, Default)]
-    struct Bind {
-        fmt: CS_DATAFMT,
-        buffer: Vec<u8>,
-        data_length: i32,
-        indicator: i16
-    }
 
     #[test]
     fn text_context() {
@@ -491,116 +740,12 @@ mod tests {
         conn.set_props(CS_LOGIN_TIMEOUT, Property::I32(5)).unwrap();
         conn.connect("***REMOVED***:2025").unwrap();
 
-        let mut cmd = Command::new(&mut conn);
-        cmd.command(
-            CS_LANG_CMD,
-            CommandArg::String(
-                "select 'This is a string' as col1, getdate(), 1, cast(3.14 as numeric(18,2)), 0x626162757368 as text"),
-            CS_UNUSED)
+        {
+        let st = Statement::new(&mut conn, "select 'aaa', cast(2 as int), getdate(), cast(3.14 as numeric(18,2)), 'bbb' as text, cast(0xDEADBEEF as image), cast('ccc' as text)")
             .unwrap();
-        cmd.send().unwrap();
-
-        let mut binds: Vec<Bind> = Vec::new();
-        let mut ret;
-        loop {
-            let res_type;
-            (ret, res_type) = cmd.results().unwrap();
-            if ret != CS_SUCCEED {
-                break;
-            }
-
-            match res_type {
-                CS_ROW_RESULT => {
-                    let cols: i32 = cmd.res_info(CS_NUMDATA).unwrap();
-                    println!("Column count: {}", cols);
-
-                    binds.resize(cols as usize, Default::default());
-                    for col in 0..cols {
-                        /*
-                            bind.name for column alias
-                            bind.status & CS_CANBENULL
-                        */
-                        let bind = &mut binds[col as usize];
-                        bind.fmt = cmd.describe(col + 1).unwrap();
-
-                        println!("col{}: {}", col, Context::type_name(bind.fmt.datatype).unwrap_or(""));
-                        bind.fmt.format = CS_FMT_UNUSED as i32;
-                        match bind.fmt.datatype {
-                            CS_CHAR_TYPE | CS_LONGCHAR_TYPE | CS_VARCHAR_TYPE | CS_UNICHAR_TYPE | CS_TEXT_TYPE | CS_UNITEXT_TYPE => {
-                                bind.fmt.maxlength += 1;
-                                bind.fmt.format = CS_FMT_NULLTERM as i32;
-                            },
-                            _ => {}
-                        }
-                        bind.buffer.resize(bind.fmt.maxlength as usize, 0);
-                        bind.fmt.count = 1;
-
-                        unsafe {
-                            cmd.bind_unsafe(
-                                (col + 1) as i32,
-                                &mut bind.fmt,
-                                mem::transmute(bind.buffer.as_mut_ptr()),
-                                &mut bind.data_length,
-                                &mut bind.indicator)
-                            .unwrap();
-                        }
-                    }
-                                        
-                    while cmd.fetch().unwrap() {
-                        for col in 0..cols {
-                            let bind = &binds[col as usize];
-                            match bind.fmt.datatype {
-                                CS_CHAR_TYPE | CS_LONGCHAR_TYPE | CS_VARCHAR_TYPE | CS_UNICHAR_TYPE | CS_TEXT_TYPE | CS_UNITEXT_TYPE => {
-                                    let len = (bind.data_length as usize) - 1;
-                                    let value = String::from_utf8_lossy(&bind.buffer.as_slice()[0..len]);
-                                    println!("{}: {:?}", col, value);
-                                },
-                                CS_DATETIME_TYPE => {
-                                    unsafe {
-                                        let buf: *const CS_DATETIME = mem::transmute(bind.buffer.as_ptr());
-                                        println!("{}: {:?}", col, *buf);
-                                    }
-                                },
-                                CS_INT_TYPE => {
-                                    unsafe {
-                                        let buf: *const CS_INT = mem::transmute(bind.buffer.as_ptr());
-                                        println!("{}: {:?}", col, *buf);
-                                    }
-                                },
-                                CS_NUMERIC_TYPE => {
-                                    unsafe {
-                                        let buf: *const CS_NUMERIC = mem::transmute(bind.buffer.as_ptr());
-                                        println!("{}: {:?}", col, *buf);
-                                    }
-                                },
-                                CS_BINARY_TYPE => {
-                                    println!("{}: {:?}", col, &bind.buffer.as_slice()[0..bind.data_length as usize]);
-                                },
-                                _ => {
-                                    panic!("{} not implemented", Context::type_name(bind.fmt.datatype).unwrap_or(""));
-                                }
-                            }
-                        }
-                    }
-                },
-                CS_CMD_SUCCEED => {
-                    println!("No rows returned");
-                },
-                CS_CMD_FAIL => {
-                    println!("Command execution failed");
-                },
-                CS_CMD_DONE => {
-                    println!("Command execution done");
-                },
-                _ => {
-                    println!("ct_results: unexpected return value");
-                }
-            }
         }
 
-        if ret != CS_SUCCEED && ret != CS_END_RESULTS {
-            panic!("ct_results returned {}", ret);
-        }
+        println!("Here");
     }
 
 }
