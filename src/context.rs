@@ -1,6 +1,30 @@
 use std::{ptr, rc::Rc, mem};
 use freetds_sys::*;
-use crate::{Result, error::err, error::Error};
+use crate::{Result, error::err, error::{Error, succeeded}};
+
+pub enum CSDateTime {
+    DateOrTime(i32),
+    DateTime(CS_DATETIME),
+    SmallDateTime(CS_DATETIME4),
+}
+
+impl From<i32> for CSDateTime {
+    fn from(dt: i32) -> Self {
+        Self::DateOrTime(dt)
+    }
+}
+
+impl From<CS_DATETIME> for CSDateTime {
+    fn from(dt: CS_DATETIME) -> Self {
+        Self::DateTime(dt)
+    }
+}
+
+impl From<CS_DATETIME4> for CSDateTime {
+    fn from(dt: CS_DATETIME4) -> Self {
+        Self::SmallDateTime(dt)
+    }
+}
 
 #[derive(Debug)]
 pub struct CSContext {
@@ -75,6 +99,38 @@ impl Context {
             }
         }
     }
+
+    unsafe fn dt_crack_unsafe<T>(&mut self, type_: i32, dateval: *const T) -> Result<CS_DATEREC> {
+        let mut daterec: CS_DATEREC = Default::default();
+        let ret = cs_dt_crack(self.ctx.handle, type_, mem::transmute(dateval), &mut daterec);
+        succeeded!(ret, cs_dt_crack);
+        Ok(daterec)
+    }
+
+    pub fn crack_date(&mut self, val: CS_DATE) -> Result<CS_DATEREC> {
+        unsafe {
+            self.dt_crack_unsafe(CS_DATE_TYPE, &val)
+        }
+    }
+
+    pub fn crack_time(&mut self, val: CS_TIME) -> Result<CS_DATEREC> {
+        unsafe {
+            self.dt_crack_unsafe(CS_TIME_TYPE, &val)
+        }
+    }
+
+    pub fn crack_datetime(&mut self, val: CS_DATETIME) -> Result<CS_DATEREC> {
+        unsafe {
+            self.dt_crack_unsafe(CS_DATETIME_TYPE, &val)
+        }
+    }
+
+    pub fn crack_smalldatetime(&mut self, val: CS_DATETIME4) -> Result<CS_DATEREC> {
+        unsafe {
+            self.dt_crack_unsafe(CS_DATETIME4_TYPE, &val)
+        }
+    }
+
 }
 
 

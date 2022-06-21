@@ -2,3 +2,4 @@ ctlibrary
 target
 .DS_Store
 ._*
+.vscode

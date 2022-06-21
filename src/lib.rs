@@ -1,5 +1,4 @@
 use freetds_sys::*;
-
 pub mod context;
 pub mod connection;
 pub mod command;
@@ -36,16 +35,30 @@ mod tests {
         conn.connect("***REMOVED***:2025").unwrap();
 
         let mut st = Statement::new(&mut conn);
-        let has_results = st.execute("select 'aaa', cast(2 as int), getdate(), cast(3.14 as numeric(18,2)), /*cast(0xDEADBEEF as image), */cast('ccc' as text)")
+        let has_results = st.execute("select 'aaa', cast(2 as int), getdate(), cast(40000000000 as numeric), cast(3.14 as numeric(18,2)), cast(0xDEADBEEF as image), cast('ccc' as text)")
             .unwrap();
         println!("has_results: {}", has_results);
 
         let cols = st.column_count().unwrap();
         while st.next().unwrap() {
-            for i in 0..cols {
-                print!("{};", st.get_string(i).unwrap());
+            let col1 = st.get_string(0).unwrap();
+            let col2 = st.get_int(1).unwrap();
+            let col3 = st.get_date(2).unwrap();
+            let col4 = st.get_int64(3).unwrap();
+            let col5 = st.get_float(4).unwrap();
+            let col6 = st.get_blob(5).unwrap();
+
+            print!("{}\t{}\t{}\t{}\t{}", col1, col2, col3, col4, col5);
+            
+            let mut col6_str = String::new();
+            col6_str.push_str("0x");
+            for c in &col6 {
+                col6_str.push_str(&format!("{:02X}", c));
             }
-            println!("");
+            print!("\t{}", col6_str);
+
+            let col7 = st.get_string(6).unwrap();
+            println!("\t{}", col7);
         }
         
     }
