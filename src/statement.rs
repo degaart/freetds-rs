@@ -321,7 +321,7 @@ impl Statement {
         }
     }
 
-    pub fn get_string(&mut self, col: impl TryInto<usize>) -> Result<String> {
+    pub fn get_string(&mut self, col: impl TryInto<usize>) -> Result<Option<String>> {
         if self.state != StatementState::ResultsReady {
             return err!("Invalid statement state");
         }
@@ -329,32 +329,49 @@ impl Statement {
         let col_index: usize = col.try_into()
             .map_err(|_| Error::from_message("Invalid column index"))?;
         let bind = &self.binds[col_index];
-        match bind.fmt.datatype {
-            CS_CHAR_TYPE | CS_LONGCHAR_TYPE | CS_VARCHAR_TYPE | CS_UNICHAR_TYPE | CS_TEXT_TYPE | CS_UNITEXT_TYPE => {
-                let len = (bind.data_length as usize) - 1;
-                let value = String::from_utf8_lossy(&bind.buffer.as_slice()[0..len]);
-                return Ok(value.to_string());
+        match bind.indicator {
+            -1 => {
+                Ok(None)
+            },
+            0 => {
+                match bind.fmt.datatype {
+                    CS_CHAR_TYPE | CS_LONGCHAR_TYPE | CS_VARCHAR_TYPE | CS_UNICHAR_TYPE | CS_TEXT_TYPE | CS_UNITEXT_TYPE => {
+                        let len = (bind.data_length as usize) - 1;
+                        let value = String::from_utf8_lossy(&bind.buffer.as_slice()[0..len]);
+                        Ok(Some(value.to_string()))
+                    },
+                    _ => {
+                        let mut dstfmt: CS_DATAFMT = Default::default();
+                        dstfmt.datatype = CS_CHAR_TYPE;
+                        dstfmt.maxlength = match bind.fmt.datatype {
+                            CS_BINARY_TYPE | CS_LONGBINARY_TYPE | CS_IMAGE_TYPE => {
+                                ((bind.data_length * 2) + 16) as i32
+                            },
+                            _ => {
+                                128
+                            }
+                        };
+                        dstfmt.format = CS_FMT_UNUSED as i32;
+                        dstfmt.count = 1;
+        
+                        let mut dstdata: Vec<u8> = Vec::new();
+                        dstdata.resize(dstfmt.maxlength as usize, Default::default());
+                        let dstlen = self.command.conn.ctx.convert(
+                            &bind.fmt, &bind.buffer,
+                            &dstfmt,
+                            &mut dstdata)?;
+        
+                        Ok(Some(String::from_utf8_lossy(&dstdata.as_slice()[0..dstlen]).to_string()))
+                    }
+                }
             },
             _ => {
-                let mut dstfmt: CS_DATAFMT = Default::default();
-                dstfmt.datatype = CS_CHAR_TYPE;
-                dstfmt.maxlength = if bind.fmt.maxlength < 200 { 100 } else { bind.fmt.maxlength * 2 };
-                dstfmt.format = CS_FMT_UNUSED as i32;
-                dstfmt.count = 1;
-
-                let mut dstdata: Vec<u8> = Vec::new();
-                dstdata.resize(dstfmt.maxlength as usize, Default::default());
-                let dstlen = self.command.conn.ctx.convert(
-                    &bind.fmt, &bind.buffer,
-                    &dstfmt,
-                    &mut dstdata)?;
-
-                return Ok(String::from_utf8_lossy(&dstdata.as_slice()[0..dstlen]).to_string());
+                err!("Truncation occured")
             }
         }
     }
 
-    pub fn get_int(&mut self, col: impl TryInto<usize>) -> Result<i32> {
+    pub fn get_int(&mut self, col: impl TryInto<usize>) -> Result<Option<i32>> {
         if self.state != StatementState::ResultsReady {
             return err!("Invalid statement state");
         }
@@ -362,38 +379,48 @@ impl Statement {
         let col_index: usize = col.try_into()
             .map_err(|_| Error::from_message("Invalid column index"))?;
         let bind = &self.binds[col_index];
-        match bind.fmt.datatype {
-            CS_INT_TYPE => {
-                unsafe {
-                    assert!(bind.buffer.len() == mem::size_of::<i32>());
-                    let buf: *const i32 = mem::transmute(bind.buffer.as_ptr());
-                    return Ok(*buf);
+        match bind.indicator {
+            -1 => {
+                Ok(None)
+            },
+            0 => {
+                match bind.fmt.datatype {
+                    CS_INT_TYPE => {
+                        unsafe {
+                            assert!(bind.buffer.len() == mem::size_of::<i32>());
+                            let buf: *const i32 = mem::transmute(bind.buffer.as_ptr());
+                            Ok(Some(*buf))
+                        }
+                    },
+                    _ => {
+                        let mut dstfmt: CS_DATAFMT = Default::default();
+                        dstfmt.datatype = CS_INT_TYPE;
+                        dstfmt.maxlength = mem::size_of::<i32>() as i32;
+                        dstfmt.format = CS_FMT_UNUSED as i32;
+                        dstfmt.count = 1;
+
+                        let mut dstdata: Vec<u8> = Vec::new();
+                        dstdata.resize(dstfmt.maxlength as usize, Default::default());
+                        let dstlen = self.command.conn.ctx.convert(
+                            &bind.fmt, &bind.buffer,
+                            &dstfmt,
+                            &mut dstdata)?;
+                        
+                        assert!(dstlen == mem::size_of::<i32>());
+                        unsafe {
+                            let buf: *const i32 = mem::transmute(dstdata.as_ptr());
+                            Ok(Some(*buf))
+                        }
+                    }
                 }
             },
             _ => {
-                let mut dstfmt: CS_DATAFMT = Default::default();
-                dstfmt.datatype = CS_INT_TYPE;
-                dstfmt.maxlength = mem::size_of::<i32>() as i32;
-                dstfmt.format = CS_FMT_UNUSED as i32;
-                dstfmt.count = 1;
-
-                let mut dstdata: Vec<u8> = Vec::new();
-                dstdata.resize(dstfmt.maxlength as usize, Default::default());
-                let dstlen = self.command.conn.ctx.convert(
-                    &bind.fmt, &bind.buffer,
-                    &dstfmt,
-                    &mut dstdata)?;
-                
-                assert!(dstlen == mem::size_of::<i32>());
-                unsafe {
-                    let buf: *const i32 = mem::transmute(dstdata.as_ptr());
-                    return Ok(*buf);
-                }
+                err!("Truncation occured")
             }
         }
     }
 
-    pub fn get_int64(&mut self, col: impl TryInto<usize>) -> Result<i64> {
+    pub fn get_int64(&mut self, col: impl TryInto<usize>) -> Result<Option<i64>> {
         if self.state != StatementState::ResultsReady {
             return err!("Invalid statement state");
         }
@@ -401,38 +428,48 @@ impl Statement {
         let col_index: usize = col.try_into()
             .map_err(|_| Error::from_message("Invalid column index"))?;
         let bind = &self.binds[col_index];
-        match bind.fmt.datatype {
-            CS_LONG_TYPE => {
-                unsafe {
-                    assert!(bind.buffer.len() == mem::size_of::<i64>());
-                    let buf: *const i64 = mem::transmute(bind.buffer.as_ptr());
-                    return Ok(*buf);
+        match bind.indicator {
+            -1 => {
+                Ok(None)
+            },
+            0 => {
+                match bind.fmt.datatype {
+                    CS_LONG_TYPE => {
+                        unsafe {
+                            assert!(bind.buffer.len() == mem::size_of::<i64>());
+                            let buf: *const i64 = mem::transmute(bind.buffer.as_ptr());
+                            Ok(Some(*buf))
+                        }
+                    },
+                    _ => {
+                        let mut dstfmt: CS_DATAFMT = Default::default();
+                        dstfmt.datatype = CS_LONG_TYPE;
+                        dstfmt.maxlength = mem::size_of::<i64>() as i32;
+                        dstfmt.format = CS_FMT_UNUSED as i32;
+                        dstfmt.count = 1;
+
+                        let mut dstdata: Vec<u8> = Vec::new();
+                        dstdata.resize(dstfmt.maxlength as usize, Default::default());
+                        let dstlen = self.command.conn.ctx.convert(
+                            &bind.fmt, &bind.buffer,
+                            &dstfmt,
+                            &mut dstdata)?;
+                        
+                        assert!(dstlen == mem::size_of::<i64>());
+                        unsafe {
+                            let buf: *const i64 = mem::transmute(dstdata.as_ptr());
+                            Ok(Some(*buf))
+                        }
+                    }
                 }
             },
             _ => {
-                let mut dstfmt: CS_DATAFMT = Default::default();
-                dstfmt.datatype = CS_LONG_TYPE;
-                dstfmt.maxlength = mem::size_of::<i64>() as i32;
-                dstfmt.format = CS_FMT_UNUSED as i32;
-                dstfmt.count = 1;
-
-                let mut dstdata: Vec<u8> = Vec::new();
-                dstdata.resize(dstfmt.maxlength as usize, Default::default());
-                let dstlen = self.command.conn.ctx.convert(
-                    &bind.fmt, &bind.buffer,
-                    &dstfmt,
-                    &mut dstdata)?;
-                
-                assert!(dstlen == mem::size_of::<i64>());
-                unsafe {
-                    let buf: *const i64 = mem::transmute(dstdata.as_ptr());
-                    return Ok(*buf);
-                }
+                err!("Truncation occured")
             }
         }
     }
 
-    pub fn get_float(&mut self, col: impl TryInto<usize>) -> Result<f64> {
+    pub fn get_float(&mut self, col: impl TryInto<usize>) -> Result<Option<f64>> {
         if self.state != StatementState::ResultsReady {
             return err!("Invalid statement state");
         }
@@ -440,38 +477,48 @@ impl Statement {
         let col_index: usize = col.try_into()
             .map_err(|_| Error::from_message("Invalid column index"))?;
         let bind = &self.binds[col_index];
-        match bind.fmt.datatype {
-            CS_FLOAT_TYPE => {
-                unsafe {
-                    assert!(bind.buffer.len() == mem::size_of::<f64>());
-                    let buf: *const f64 = mem::transmute(bind.buffer.as_ptr());
-                    return Ok(*buf);
+        match bind.indicator {
+            -1 => {
+                Ok(None)
+            },
+            0 => {
+                match bind.fmt.datatype {
+                    CS_FLOAT_TYPE => {
+                        unsafe {
+                            assert!(bind.buffer.len() == mem::size_of::<f64>());
+                            let buf: *const f64 = mem::transmute(bind.buffer.as_ptr());
+                            Ok(Some(*buf))
+                        }
+                    },
+                    _ => {
+                        let mut dstfmt: CS_DATAFMT = Default::default();
+                        dstfmt.datatype = CS_FLOAT_TYPE;
+                        dstfmt.maxlength = mem::size_of::<f64>() as i32;
+                        dstfmt.format = CS_FMT_UNUSED as i32;
+                        dstfmt.count = 1;
+
+                        let mut dstdata: Vec<u8> = Vec::new();
+                        dstdata.resize(dstfmt.maxlength as usize, Default::default());
+                        let dstlen = self.command.conn.ctx.convert(
+                            &bind.fmt, &bind.buffer,
+                            &dstfmt,
+                            &mut dstdata)?;
+                        
+                        assert!(dstlen == mem::size_of::<f64>());
+                        unsafe {
+                            let buf: *const f64 = mem::transmute(dstdata.as_ptr());
+                            Ok(Some(*buf))
+                        }
+                    }
                 }
             },
             _ => {
-                let mut dstfmt: CS_DATAFMT = Default::default();
-                dstfmt.datatype = CS_FLOAT_TYPE;
-                dstfmt.maxlength = mem::size_of::<f64>() as i32;
-                dstfmt.format = CS_FMT_UNUSED as i32;
-                dstfmt.count = 1;
-
-                let mut dstdata: Vec<u8> = Vec::new();
-                dstdata.resize(dstfmt.maxlength as usize, Default::default());
-                let dstlen = self.command.conn.ctx.convert(
-                    &bind.fmt, &bind.buffer,
-                    &dstfmt,
-                    &mut dstdata)?;
-                
-                assert!(dstlen == mem::size_of::<f64>());
-                unsafe {
-                    let buf: *const f64 = mem::transmute(dstdata.as_ptr());
-                    return Ok(*buf);
-                }
+                err!("Truncation occured")
             }
         }
     }
 
-    pub fn get_date(&mut self, col: impl TryInto<usize>) -> Result<CS_DATEREC> {
+    pub fn get_date(&mut self, col: impl TryInto<usize>) -> Result<Option<CS_DATEREC>> {
         if self.state != StatementState::ResultsReady {
             return err!("Invalid statement state");
         }
@@ -479,59 +526,69 @@ impl Statement {
         let col_index: usize = col.try_into()
             .map_err(|_| Error::from_message("Invalid column index"))?;
         let bind = &self.binds[col_index];
-        match bind.fmt.datatype {
-            CS_DATE_TYPE => {
-                unsafe {
-                    assert!(bind.buffer.len() == mem::size_of::<CS_DATE>());
-                    let buf: *const CS_DATE = mem::transmute(bind.buffer.as_ptr());
-                    return Ok(self.command.conn.ctx.crack_date(*buf)?);
-                }
+        match bind.indicator {
+            -1 => {
+                Ok(None)
             },
-            CS_TIME_TYPE => {
-                unsafe {
-                    assert!(bind.buffer.len() == mem::size_of::<CS_TIME>());
-                    let buf: *const CS_TIME = mem::transmute(bind.buffer.as_ptr());
-                    return Ok(self.command.conn.ctx.crack_time(*buf)?);
-                }
-            },
-            CS_DATETIME_TYPE => {
-                unsafe {
-                    assert!(bind.buffer.len() == mem::size_of::<CS_DATETIME>());
-                    let buf: *const CS_DATETIME = mem::transmute(bind.buffer.as_ptr());
-                    return Ok(self.command.conn.ctx.crack_datetime(*buf)?);
-                }
-            },
-            CS_DATETIME4_TYPE => {
-                unsafe {
-                    assert!(bind.buffer.len() == mem::size_of::<CS_DATETIME4>());
-                    let buf: *const CS_DATETIME4 = mem::transmute(bind.buffer.as_ptr());
-                    return Ok(self.command.conn.ctx.crack_smalldatetime(*buf)?);
+            0 => {
+                match bind.fmt.datatype {
+                    CS_DATE_TYPE => {
+                        unsafe {
+                            assert!(bind.buffer.len() == mem::size_of::<CS_DATE>());
+                            let buf: *const CS_DATE = mem::transmute(bind.buffer.as_ptr());
+                            Ok(Some(self.command.conn.ctx.crack_date(*buf)?))
+                        }
+                    },
+                    CS_TIME_TYPE => {
+                        unsafe {
+                            assert!(bind.buffer.len() == mem::size_of::<CS_TIME>());
+                            let buf: *const CS_TIME = mem::transmute(bind.buffer.as_ptr());
+                            Ok(Some(self.command.conn.ctx.crack_time(*buf)?))
+                        }
+                    },
+                    CS_DATETIME_TYPE => {
+                        unsafe {
+                            assert!(bind.buffer.len() == mem::size_of::<CS_DATETIME>());
+                            let buf: *const CS_DATETIME = mem::transmute(bind.buffer.as_ptr());
+                            Ok(Some(self.command.conn.ctx.crack_datetime(*buf)?))
+                        }
+                    },
+                    CS_DATETIME4_TYPE => {
+                        unsafe {
+                            assert!(bind.buffer.len() == mem::size_of::<CS_DATETIME4>());
+                            let buf: *const CS_DATETIME4 = mem::transmute(bind.buffer.as_ptr());
+                            Ok(Some(self.command.conn.ctx.crack_smalldatetime(*buf)?))
+                        }
+                    },
+                    _ => {
+                        let mut dstfmt: CS_DATAFMT = Default::default();
+                        dstfmt.datatype = CS_DATETIME_TYPE;
+                        dstfmt.maxlength = mem::size_of::<CS_DATETIME>() as i32;
+                        dstfmt.format = CS_FMT_UNUSED as i32;
+                        dstfmt.count = 1;
+
+                        let mut dstdata: Vec<u8> = Vec::new();
+                        dstdata.resize(dstfmt.maxlength as usize, Default::default());
+                        let dstlen = self.command.conn.ctx.convert(
+                            &bind.fmt, &bind.buffer,
+                            &dstfmt,
+                            &mut dstdata)?;
+                        
+                        assert!(dstlen == mem::size_of::<CS_DATETIME>());
+                        unsafe {
+                            let buf: *const CS_DATETIME = mem::transmute(dstdata.as_ptr());
+                            Ok(Some(self.command.conn.ctx.crack_datetime(*buf)?))
+                        }
+                    }
                 }
             },
             _ => {
-                let mut dstfmt: CS_DATAFMT = Default::default();
-                dstfmt.datatype = CS_DATETIME_TYPE;
-                dstfmt.maxlength = mem::size_of::<CS_DATETIME>() as i32;
-                dstfmt.format = CS_FMT_UNUSED as i32;
-                dstfmt.count = 1;
-
-                let mut dstdata: Vec<u8> = Vec::new();
-                dstdata.resize(dstfmt.maxlength as usize, Default::default());
-                let dstlen = self.command.conn.ctx.convert(
-                    &bind.fmt, &bind.buffer,
-                    &dstfmt,
-                    &mut dstdata)?;
-                
-                assert!(dstlen == mem::size_of::<CS_DATETIME>());
-                unsafe {
-                    let buf: *const CS_DATETIME = mem::transmute(dstdata.as_ptr());
-                    return Ok(self.command.conn.ctx.crack_datetime(*buf)?);
-                }
+                err!("Truncation occured")
             }
         }
     }
 
-    pub fn get_blob(&mut self, col: impl TryInto<usize>) -> Result<Vec<u8>> {
+    pub fn get_blob(&mut self, col: impl TryInto<usize>) -> Result<Option<Vec<u8>>> {
         if self.state != StatementState::ResultsReady {
             return err!("Invalid statement state");
         }
@@ -539,33 +596,42 @@ impl Statement {
         let col_index: usize = col.try_into()
             .map_err(|_| Error::from_message("Invalid column index"))?;
         let bind = &self.binds[col_index];
-
-        match bind.fmt.datatype {
-            CS_BINARY_TYPE | CS_LONGBINARY_TYPE | CS_IMAGE_TYPE => {
-                let len = bind.data_length as usize;
-                return Ok(bind.buffer.as_slice()[0..len].to_vec());
+        match bind.indicator {
+            -1 => {
+                Ok(None)
             },
-            CS_VARBINARY_TYPE => {
-                unsafe {
-                    assert!(bind.buffer.len() == mem::size_of::<CS_VARBINARY>());
-                    let buf: *const CS_VARBINARY = mem::transmute(bind.buffer.as_ptr());
-                    let len = (*buf).len as usize;
-                    let res: Vec<u8> = (*buf).array.iter().take(len).map(|c| *c as u8).collect();
-                    return Ok(res);
+            0 => {
+                match bind.fmt.datatype {
+                    CS_BINARY_TYPE | CS_LONGBINARY_TYPE | CS_IMAGE_TYPE => {
+                        let len = bind.data_length as usize;
+                        Ok(Some(bind.buffer.as_slice()[0..len].to_vec()))
+                    },
+                    CS_VARBINARY_TYPE => {
+                        unsafe {
+                            assert!(bind.buffer.len() == mem::size_of::<CS_VARBINARY>());
+                            let buf: *const CS_VARBINARY = mem::transmute(bind.buffer.as_ptr());
+                            let len = (*buf).len as usize;
+                            let res: Vec<u8> = (*buf).array.iter().take(len).map(|c| *c as u8).collect();
+                            Ok(Some(res))
+                        }
+                    },
+                    _ => {
+                        let mut dstfmt: CS_DATAFMT = Default::default();
+                        dstfmt.datatype = CS_BINARY_TYPE;
+                        dstfmt.maxlength = bind.fmt.maxlength;
+                        dstfmt.format = CS_FMT_UNUSED as i32;
+                        dstfmt.count = 1;
+
+                        let mut dstdata: Vec<u8> = Vec::new();
+                        dstdata.resize(dstfmt.maxlength as usize, Default::default());
+                        let dstlen = self.command.conn.ctx.convert(&bind.fmt, &bind.buffer, &dstfmt, &mut dstdata)?;
+                        dstdata.resize(dstlen, Default::default());
+                        Ok(Some(dstdata))
+                    }
                 }
             },
             _ => {
-                let mut dstfmt: CS_DATAFMT = Default::default();
-                dstfmt.datatype = CS_BINARY_TYPE;
-                dstfmt.maxlength = bind.fmt.maxlength;
-                dstfmt.format = CS_FMT_UNUSED as i32;
-                dstfmt.count = 1;
-
-                let mut dstdata: Vec<u8> = Vec::new();
-                dstdata.resize(dstfmt.maxlength as usize, Default::default());
-                let dstlen = self.command.conn.ctx.convert(&bind.fmt, &bind.buffer, &dstfmt, &mut dstdata)?;
-                dstdata.resize(dstlen, Default::default());
-                return Ok(dstdata);
+                err!("Truncation occured")
             }
         }
     }
