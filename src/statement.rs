@@ -6,6 +6,92 @@ use crate::error::err;
 use crate::{command::Command, connection::Connection, error::Error};
 use crate::Result;
 
+pub trait ToSql {
+    fn to_sql(&self) -> String;
+
+}
+pub type ToSqlValue = Box<dyn ToSql>;
+
+impl ToSql for &str {
+    fn to_sql(&self) -> String {
+        let mut result = String::new();
+        result.push('\'');
+        for c in self.chars() {
+            result.push(c);
+            if c == '\'' {
+                result.push(c);
+            }
+        }
+        result.push('\'');
+        return result;
+    }
+}
+
+impl ToSql for i32 {
+    fn to_sql(&self) -> String {
+        return format!("{}", self);
+    }
+}
+
+impl ToSql for i64 {
+    fn to_sql(&self) -> String {
+        return format!("{}", self);
+    }
+}
+
+impl ToSql for f64 {
+    fn to_sql(&self) -> String {
+        return format!("{}", self);
+    }
+}
+
+impl ToSql for CS_DATEREC {
+    fn to_sql(&self) -> String {
+        format!("'{:04}/{:02}/{:02} {:02}:{:02}:{:02}.{}'",
+            self.dateyear,
+            self.datemonth + 1,
+            self.datedmonth,
+            self.datehour,
+            self.dateminute,
+            self.datesecond,
+            self.datesecfrac)
+    }
+}
+
+impl ToSql for Vec<u8> {
+    fn to_sql(&self) -> String {
+        let mut result = String::new();
+        result.push_str("0x");
+        for c in self.iter() {
+            result.push_str(&format!("{:02X}", c));
+        }
+        return result;
+    }
+}
+
+impl ToSql for &[u8] {
+    fn to_sql(&self) -> String {
+        let mut result = String::new();
+        result.push_str("0x");
+        for c in self.iter() {
+            result.push_str(&format!("{:02X}", c));
+        }
+        return result;
+    }
+}
+
+#[derive(PartialEq, Debug)]
+enum TextPiece {
+    Literal(String),
+    Placeholder
+}
+
+struct ParsedQuery {
+    text: String,
+    pieces: Vec<TextPiece>,
+    param_count: i32
+}
+
 #[derive(Debug, Clone, Default)]
 struct Bind {
     fmt: CS_DATAFMT,
@@ -26,7 +112,7 @@ pub struct Statement {
     command: Command,
     state: StatementState,
     binds: Vec<Bind>,
-    has_errors: bool,
+    has_errors: bool
 }
 
 impl Statement {
@@ -40,12 +126,15 @@ impl Statement {
         }
     }
 
-    pub fn execute(&mut self, text: impl AsRef<str>) -> Result<bool> {
+    pub fn execute(&mut self, text: impl AsRef<str>, params: &[&dyn ToSql]) -> Result<bool> {
         if self.state != StatementState::New {
             return err!("Invalid statement state");
         }
 
-        self.command.command(CS_LANG_CMD, CommandArg::String(text.as_ref()), CS_UNUSED)?;
+        let parsed_query = Self::parse_query(text.as_ref());
+        let text = Self::generate_query(&parsed_query, params);
+        
+        self.command.command(CS_LANG_CMD, CommandArg::String(&text), CS_UNUSED)?;
         self.command.send()?;
         self.get_row_result()?;
         if self.has_errors {
@@ -135,6 +224,79 @@ impl Statement {
         }
     }
 
+    /*
+        TODO: Handle string quoting '''' and """"
+    */
+    fn parse_query(text: impl AsRef<str>) -> ParsedQuery {
+        let mut pieces: Vec<TextPiece> = Vec::new();
+        let mut param_count: i32 = 0;
+        let mut cur = String::new();
+        let mut it = text.as_ref().chars().peekable();
+        loop {
+            let c = it.next();
+            match c {
+                None => {
+                    break;
+                },
+                Some(c) => {
+                    match c {
+                        '\'' | '"' => {
+                            cur.push(c);
+                            while let Some(c1) = it.next() {
+                                cur.push(c1);
+                                if c1 == c {
+                                    break;
+                                }
+                            }
+                        },
+                        '/' => {
+                            if it.peek().unwrap_or(&'\0') == &'*' {
+                                cur.push(c);
+                                while let Some(c1) = it.next() {
+                                    cur.push(c1);
+                                    if c1 == '*' && it.peek().unwrap_or(&'\0') == &'/' {
+                                        break;
+                                    }
+                                }
+                            } else {
+                                cur.push(c);
+                            }
+                        },
+                        '-' => {
+                            if it.peek().unwrap_or(&'\0') == &'-' {
+                                cur.push(c);
+                                while let Some(c1) = it.next() {
+                                    cur.push(c1);
+                                }
+                            }
+                        },
+                        '?' => {
+                            if cur.len() > 0 {
+                                pieces.push(TextPiece::Literal(cur.clone()));
+                                cur.clear();
+                            }
+                            pieces.push(TextPiece::Placeholder);
+                            param_count += 1;
+                        },
+                        _ => {
+                            cur.push(c);
+                        }
+                    }
+                }
+            }
+        }
+    
+        if cur.len() > 0 {
+            pieces.push(TextPiece::Literal(cur.clone()));
+        }
+        
+        ParsedQuery {
+            text: text.as_ref().to_string(),
+            pieces: pieces,
+            param_count: param_count
+        }
+    }
+
     pub fn next(&mut self) -> Result<bool> {
         if self.state == StatementState::Done || self.state == StatementState::ResultSetDone {
             return Ok(false)
@@ -177,7 +339,7 @@ impl Statement {
                 let mut dstfmt: CS_DATAFMT = Default::default();
                 dstfmt.datatype = CS_CHAR_TYPE;
                 dstfmt.maxlength = if bind.fmt.maxlength < 200 { 100 } else { bind.fmt.maxlength * 2 };
-                dstfmt.format = CS_FMT_NULLTERM as i32;
+                dstfmt.format = CS_FMT_UNUSED as i32;
                 dstfmt.count = 1;
 
                 let mut dstdata: Vec<u8> = Vec::new();
@@ -408,4 +570,83 @@ impl Statement {
         }
     }
 
+    fn generate_query(query: &ParsedQuery, params: &[&dyn ToSql]) -> String {
+        let mut result = String::new();
+        let mut params = params.iter();
+        for piece in &query.pieces {
+            result.push_str(&match piece {
+                TextPiece::Literal(s) => {
+                    s.to_string()
+                },
+                TextPiece::Placeholder => {
+                    match params.next() {
+                        Some(value) => {
+                            value.to_sql()
+                        },
+                        None => {
+                            "null".to_string()
+                        }
+                    }
+                }
+            });
+        }
+        return result;
+    }
+
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_query() {
+        let s = "?, '?', ?, \"?\", ? /* que? */, ? -- ?no?";
+        let query = Statement::parse_query(s);
+        assert_eq!(query.text, s);
+        assert_eq!(query.pieces.len(), 8);
+        assert_eq!(query.param_count, 4);
+
+        let concated: String = query.pieces.iter().map(
+            |p| match p {
+                TextPiece::Literal(s) => {
+                    &s
+                },
+                TextPiece::Placeholder => {
+                    "?"
+                }
+            })
+            .collect();
+        assert_eq!(s, concated);
+    }
+
+    #[test]
+    fn test_generate_query() {
+        let s = "string: ?, i32: ?, i64: ?, f64: ?, date: ?, image: ?";
+        let mut params: Vec<&dyn ToSql> = Vec::new();
+        params.push(&"aaa");
+        params.push(&1i32);
+        params.push(&2i64);
+        params.push(&3.14f64);
+
+        let param5 = CS_DATEREC {
+            dateyear: 1986,
+            datemonth: 6,
+            datedmonth: 5,
+            datehour: 10,
+            dateminute: 30,
+            datesecond: 31,
+            ..Default::default()
+        };
+        params.push(&param5);
+
+        let param6 = vec![0xDE_u8, 0xAD_u8, 0xBE_u8, 0xEF_u8];
+        params.push(&param6);
+
+        let parsed_query = Statement::parse_query(s);
+        let generated = Statement::generate_query(&parsed_query, &params);
+        assert_eq!("string: 'aaa', i32: 1, i64: 2, f64: 3.14, date: '1986/07/05 10:30:31.0', image: 0xDEADBEEF", generated);
+    }
+
+}
+
