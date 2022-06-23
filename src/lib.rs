@@ -202,5 +202,41 @@ mod tests {
 
         assert!(!st.next().unwrap());
     }
+
+    #[test]
+    fn test_multiple_queries() {
+        let ctx = Context::new();
+        unsafe {
+            debug1(ctx.ctx.handle);
+        }
+
+        let mut conn = Connection::new(&ctx);
+        conn.set_props(CS_CLIENTCHARSET, Property::String("UTF-8")).unwrap();
+        conn.set_props(CS_USERNAME, Property::String("sa")).unwrap();
+        conn.set_props(CS_PASSWORD, Property::String("")).unwrap();
+        conn.set_props(CS_DATABASE, Property::String("***REMOVED***")).unwrap();
+        conn.set_props(CS_TDS_VERSION, Property::I32(CS_TDS_50 as i32)).unwrap();
+        conn.set_props(CS_LOGIN_TIMEOUT, Property::I32(5)).unwrap();
+        conn.connect("***REMOVED***:2025").unwrap();
+
+        let mut st = Statement::new(&mut conn);
+        let has_results = st
+            .execute(
+                "select 1",
+                &[])
+            .unwrap();
+        assert!(has_results);
+        assert!(st.next().unwrap());
+        assert!(!st.next().unwrap());
+        drop(st);
+
+        let mut st = Statement::new(&mut conn);
+        let has_results = st
+                .execute("select 2", &[])
+                .unwrap();
+        assert!(has_results);
+        assert!(st.next().unwrap());
+    }
+
 }
 
