@@ -746,5 +746,6 @@ mod tests {
         assert_eq!("string: 'aaa', i32: 1, i64: 2, f64: 3.14, date: '1986/07/05 10:30:31.0', image: 0xDEADBEEF", generated);
     }
 
+    
 }
 
