@@ -18,7 +18,7 @@ extern "C" {
 
 #[cfg(test)]
 mod tests {
-    use crate::{*, context::Context, connection::Connection, property::Property, statement::{Statement, ToSql}};
+    use crate::{*, context::Context, connection::Connection, property::Property, statement::{Statement, ToSql, NULL}};
 
     #[test]
     fn test_statement() {
@@ -118,6 +118,50 @@ mod tests {
             assert_eq!(3.14f64, st.get_float(4).unwrap().unwrap());
             assert_eq!(vec![0xDEu8, 0xADu8, 0xBEu8, 0xEFu8], st.get_blob(5).unwrap().unwrap());
             assert_eq!("ccc", st.get_string(6).unwrap().unwrap());
+        }
+    }
+
+    #[test]
+    fn test_null_params() {
+        let ctx = Context::new();
+        unsafe {
+            debug1(ctx.ctx.handle);
+        }
+
+        let mut conn = Connection::new(&ctx);
+        conn.set_props(CS_CLIENTCHARSET, Property::String("UTF-8")).unwrap();
+        conn.set_props(CS_USERNAME, Property::String("sa")).unwrap();
+        conn.set_props(CS_PASSWORD, Property::String("")).unwrap();
+        conn.set_props(CS_DATABASE, Property::String("***REMOVED***")).unwrap();
+        conn.set_props(CS_TDS_VERSION, Property::I32(CS_TDS_50 as i32)).unwrap();
+        conn.set_props(CS_LOGIN_TIMEOUT, Property::I32(5)).unwrap();
+        conn.connect("***REMOVED***:2025").unwrap();
+
+        let mut st = Statement::new(&mut conn);
+        let has_results = st
+            .execute(
+                "select \
+                    ?, \
+                    cast(? as datetime), \
+                    cast(? as numeric), \
+                    cast(? as numeric(18,2)), \
+                    cast(? as image)",
+                &[&NULL, &NULL, &NULL, &NULL, &NULL])
+            .unwrap();
+        assert!(has_results);
+        
+        while st.next().unwrap() {
+            assert!(st.get_string(0).unwrap().is_none());
+            assert!(st.get_int(0).unwrap().is_none());
+            assert!(st.get_int64(0).unwrap().is_none());
+            assert!(st.get_float(0).unwrap().is_none());
+            assert!(st.get_date(0).unwrap().is_none());
+            assert!(st.get_blob(0).unwrap().is_none());
+
+            assert!(st.get_date(1).unwrap().is_none());
+            assert!(st.get_int64(2).unwrap().is_none());
+            assert!(st.get_float(3).unwrap().is_none());
+            assert!(st.get_blob(4).unwrap().is_none());
         }
     }
 
