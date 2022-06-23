@@ -148,3 +148,12 @@ impl Command {
     }
 
 }
+
+impl Drop for Command {
+    fn drop(&mut self) {
+        self
+            .cancel(CS_CANCEL_ALL)
+            .expect("cs_cancel failed");
+    }
+}
+
