@@ -165,5 +165,42 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_multiple_rows() {
+        let ctx = Context::new();
+        unsafe {
+            debug1(ctx.ctx.handle);
+        }
+
+        let mut conn = Connection::new(&ctx);
+        conn.set_props(CS_CLIENTCHARSET, Property::String("UTF-8")).unwrap();
+        conn.set_props(CS_USERNAME, Property::String("sa")).unwrap();
+        conn.set_props(CS_PASSWORD, Property::String("")).unwrap();
+        conn.set_props(CS_DATABASE, Property::String("***REMOVED***")).unwrap();
+        conn.set_props(CS_TDS_VERSION, Property::I32(CS_TDS_50 as i32)).unwrap();
+        conn.set_props(CS_LOGIN_TIMEOUT, Property::I32(5)).unwrap();
+        conn.connect("***REMOVED***:2025").unwrap();
+
+        let mut st = Statement::new(&mut conn);
+        let has_results = st
+            .execute(
+                "select 'a' union \
+                 select 'b' union \
+                 select 'c'",
+                &[])
+            .unwrap();
+        assert!(has_results);
+        
+        assert!(st.next().unwrap());
+        assert_eq!("a", st.get_string(0).unwrap().unwrap());
+
+        assert!(st.next().unwrap());
+        assert_eq!("b", st.get_string(0).unwrap().unwrap());
+
+        assert!(st.next().unwrap());
+        assert_eq!("c", st.get_string(0).unwrap().unwrap());
+
+        assert!(!st.next().unwrap());
+    }
 }
 
