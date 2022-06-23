@@ -6,11 +6,27 @@ use crate::error::err;
 use crate::{command::Command, connection::Connection, error::Error};
 use crate::Result;
 
+pub struct Null {}
+
+impl Null {
+    pub fn null() -> Self {
+        Self {}
+    }
+}
+
+#[allow(dead_code)]
+pub static NULL: Null = Null {};
+
 pub trait ToSql {
     fn to_sql(&self) -> String;
 
 }
-pub type ToSqlValue = Box<dyn ToSql>;
+
+impl ToSql for Null {
+    fn to_sql(&self) -> String {
+        "null".to_string()
+    }
+}
 
 impl ToSql for &str {
     fn to_sql(&self) -> String {
@@ -77,6 +93,22 @@ impl ToSql for &[u8] {
             result.push_str(&format!("{:02X}", c));
         }
         return result;
+    }
+}
+
+impl<T> ToSql for Option<T>
+where
+    T: ToSql
+{
+    fn to_sql(&self) -> String {
+        match self {
+            Some(value) => {
+                value.to_sql()
+            },
+            None => {
+                "null".to_string()
+            },
+        }
     }
 }
 
