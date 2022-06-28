@@ -30,22 +30,216 @@ struct Column {
 }
 
 #[derive(Debug)]
-struct RowResult {
-    columns: Vec<Column>,
-    rows: Vec<Option<Vec<u8>>>
+struct Row {
+    buffers: Vec<Option<Vec<u8>>>
 }
 
 #[derive(Debug)]
-enum SqlResult {
-    Row(RowResult),
-    Status(i32),
-    Error
+struct Rows {
+    columns: Vec<Column>,
+    rows: Vec<Row>,
+    pos: Option<usize>
+}
+
+impl Rows {
+    fn new(columns: Vec<Column>, rows: Vec<Row>) -> Self {
+        Self { columns, rows, pos: Default::default() }
+    }
 }
 
 #[derive(Debug)]
 pub struct ResultSet {
-    results: Vec<SqlResult>
+    ctx: Context,
+    results: Vec<Rows>,
+    pos: Option<usize>
 }
+
+impl ResultSet {
+    fn new(ctx: &Context, results: Vec<Rows>) -> Self {
+        Self {
+            ctx: ctx.clone(),
+            results,
+            pos: Default::default()
+        }
+    }
+
+    pub fn next_resultset(&mut self) -> bool {
+        match self.pos {
+            None => {
+                if self.results.len() == 0 {
+                    return false;
+                } else {
+                    self.pos = Some(0);
+                }
+            },
+            Some(pos) => {
+                self.pos = Some(pos + 1);
+            }
+        }
+
+        return self.pos.unwrap() < self.results.len();
+    }
+
+    pub fn next(&mut self) -> bool {
+        if self.pos.is_none() {
+            if !self.next_resultset() {
+                return false;
+            }
+        }
+
+        let result = &mut self.results[self.pos.unwrap()];
+        match result.pos {
+            None => {
+                if result.rows.len() == 0 {
+                    return false;
+                } else {
+                    result.pos = Some(0);
+                }
+            },
+            Some(pos) => {
+                result.pos = Some(pos + 1);
+            }
+        }
+
+        return result.pos.unwrap() < result.rows.len();
+    }
+
+    fn get_string(&mut self, col: impl TryInto<usize>) -> Result<Option<String>> {
+        if self.pos.is_none() {
+            return err!("Invalid state");
+        }
+        
+        let pos = self.pos.unwrap();
+        if pos >= self.results.len() {
+            return err!("Invalid state");
+        }
+        
+        let results = &self.results[pos];
+        if results.pos.is_none() {
+            return err!("Invalid state");
+        }
+
+        let pos = results.pos.unwrap();
+        if pos >= results.rows.len() {
+            return err!("Invalid state");
+        }
+
+        let row = &results.rows[pos];
+        let col: usize = col
+            .try_into()
+            .map_err(|_| Error::from_message("Invalid column index"))?;
+        if col >= results.columns.len() {
+            return err!("Invalid column index");
+        }
+
+        let column = &results.columns[col];
+        let buffer = &row.buffers[col];
+        match buffer {
+            None => {
+                return Ok(None);
+            },
+            Some(buffer) => {
+                match column.fmt.datatype {
+                    CS_CHAR_TYPE | CS_LONGCHAR_TYPE | CS_VARCHAR_TYPE | CS_UNICHAR_TYPE | CS_TEXT_TYPE | CS_UNITEXT_TYPE => {
+                        let value = String::from_utf8_lossy(buffer);
+                        return Ok(Some(value.to_string()));
+                    },
+                    _ => {
+                        let mut dstfmt: CS_DATAFMT = Default::default();
+                        dstfmt.datatype = CS_CHAR_TYPE;
+                        dstfmt.maxlength = match column.fmt.datatype {
+                            CS_BINARY_TYPE | CS_LONGBINARY_TYPE | CS_IMAGE_TYPE => {
+                                ((buffer.len() * 2) + 16) as i32
+                            },
+                            _ => {
+                                128
+                            }
+                        };
+                        dstfmt.format = CS_FMT_UNUSED as i32;
+                        dstfmt.count = 1;
+        
+                        let mut dstdata: Vec<u8> = vec![0u8; dstfmt.maxlength as usize];
+                        let dstlen = self.ctx.convert(
+                            &column.fmt, &buffer,
+                            &dstfmt,
+                            &mut dstdata)?;
+        
+                        return Ok(Some(String::from_utf8_lossy(&dstdata.as_slice()[0..dstlen]).to_string()));
+                    }                    
+                }
+            }
+        }
+    }
+
+    fn get_i32(&mut self, col: impl TryInto<usize>) -> Result<Option<i32>> {
+        if self.pos.is_none() {
+            return err!("Invalid state");
+        }
+        
+        let pos = self.pos.unwrap();
+        if pos >= self.results.len() {
+            return err!("Invalid state");
+        }
+        
+        let results = &self.results[pos];
+        if results.pos.is_none() {
+            return err!("Invalid state");
+        }
+
+        let pos = results.pos.unwrap();
+        if pos >= results.rows.len() {
+            return err!("Invalid state");
+        }
+
+        let row = &results.rows[pos];
+        let col: usize = col
+            .try_into()
+            .map_err(|_| Error::from_message("Invalid column index"))?;
+        if col >= results.columns.len() {
+            return err!("Invalid column index");
+        }
+
+        let column = &results.columns[col];
+        let buffer = &row.buffers[col];
+        match buffer {
+            None => {
+                return Ok(None);
+            },
+            Some(buffer) => {
+                match column.fmt.datatype {
+                    CS_INT_TYPE => {
+                        unsafe {
+                            assert_eq!(buffer.len(), mem::size_of::<i32>());
+                            let buf: *const i32 = mem::transmute(buffer.as_ptr());
+                            return Ok(Some(*buf));
+                        }
+                    },
+                    _ => {
+                        let mut dstfmt: CS_DATAFMT = Default::default();
+                        dstfmt.datatype = CS_INT_TYPE;
+                        dstfmt.maxlength = mem::size_of::<i32>() as i32;
+                        dstfmt.format = CS_FMT_UNUSED as i32;
+                        dstfmt.count = 1;
+        
+                        let mut dstdata: Vec<u8> = vec![0u8; dstfmt.maxlength as usize];
+                        let dstlen = self.ctx.convert(
+                            &column.fmt, &buffer,
+                            &dstfmt,
+                            &mut dstdata)?;
+                        
+                        assert_eq!(dstlen, mem::size_of::<i32>());
+                        unsafe {
+                            let buf: *const i32 = mem::transmute(dstdata.as_ptr());
+                            return Ok(Some(*buf));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+}
+
 pub struct CSConnection {
     pub handle: *mut CS_CONNECTION,
 }
@@ -156,7 +350,7 @@ impl Connection {
         command.command(CS_LANG_CMD, CommandArg::String(&text), CS_UNUSED)?;
         command.send()?;
 
-        let mut results: Vec<SqlResult> = Vec::new();
+        let mut results: Vec<Rows> = Vec::new();
         loop {
             let (ret, res_type) = command.results()?;
             if !ret {
@@ -166,23 +360,26 @@ impl Connection {
             match res_type {
                 CS_ROW_RESULT => {
                     let row_result = Self::fetch_result(&mut command)?;
-                    results.push(SqlResult::Row(row_result));
+                    results.push(row_result);
                 },
                 CS_STATUS_RESULT => {
                     let row_result = Self::fetch_result(&mut command)?;
-                    let row: &Vec<u8> = row_result.rows[0].as_ref().unwrap();
+                    let row: &Vec<u8> = row_result.rows[0].buffers[0].as_ref().unwrap();
                     let status: i32;
                     unsafe {
                         let buf: *const i32 = mem::transmute(row.as_ptr());
                         status = *buf;
                     }
-                    results.push(SqlResult::Status(status));
+                    if status != 0 {
+                        command.cancel(CS_CANCEL_ALL).unwrap();
+                        return err!("Query returned an error status: {}", status);
+                    }
                 },
                 CS_COMPUTE_RESULT | CS_CURSOR_RESULT | CS_PARAM_RESULT => {
                     command.cancel(CS_CANCEL_CURRENT)?;
                 },
                 CS_CMD_FAIL => {
-                    results.push(SqlResult::Error);
+                    return err!("Query execution resulted in error");
                 },
                 _ => {
                     /* Do nothing, most notably, ignore CS_CMD_SUCCEED and CS_CMD_DONE */
@@ -190,12 +387,10 @@ impl Connection {
             }
         }
 
-        Ok(ResultSet {
-            results
-        })
+        Ok(ResultSet::new(&self.ctx, results))
     }
 
-    fn fetch_result(cmd: &mut Command) -> Result<RowResult> {
+    fn fetch_result(cmd: &mut Command) -> Result<Rows> {
         let ncols: usize = cmd
             .res_info(CS_NUMDATA)
             .unwrap();
@@ -227,29 +422,36 @@ impl Connection {
             }
         }
 
-        let mut rows: Vec<Option<Vec<u8>>> = Vec::new();
+        let mut rows: Vec<Row> = Vec::new();
         while cmd.fetch()? {
+            let mut row = Row { buffers: Vec::new() };
             for col_idx in 0..ncols {
                 let bind = &binds[col_idx];
                 match bind.indicator {
                     -1 => {
-                        rows.push(None);
+                        row.buffers.push(None);
                     },
                     0 => {
                         let len = bind.data_length as usize;
-                        let buffer: Vec<u8> = Vec::from(&bind.buffer.as_slice()[0..len]);
-                        rows.push(Some(buffer));
+                        let buffer: Vec<u8> = match columns[col_idx].fmt.datatype {
+                            CS_CHAR_TYPE | CS_LONGCHAR_TYPE | CS_VARCHAR_TYPE | CS_UNICHAR_TYPE | CS_TEXT_TYPE | CS_UNITEXT_TYPE => {
+                                Vec::from(&bind.buffer.as_slice()[0..len-1])
+                            },
+                            _ => {
+                                Vec::from(&bind.buffer.as_slice()[0..len])
+                            }
+                        };
+
+                        row.buffers.push(Some(buffer));
                     },
                     _ => {
                         return err!("Data truncation occured");
                     }
                 }
             }
+            rows.push(row);
         }
-        Ok(RowResult {
-            columns,
-            rows
-        })
+        Ok(Rows::new(columns, rows))
     }
 
     /*
@@ -357,7 +559,7 @@ mod tests {
     use super::Connection;
 
     #[test]
-    fn test_execute() {
+    fn test_select() {
         let ctx = Context::new();
         unsafe {
             debug1(ctx.ctx.handle);
@@ -372,9 +574,12 @@ mod tests {
         conn.set_props(CS_LOGIN_TIMEOUT, Property::I32(5)).unwrap();
         conn.connect("***REMOVED***:2025").unwrap();
 
-        let text = "select 1";
-        let rs = conn.execute(&text, &[]).unwrap();
-        dbg!(rs);
+        let text = "select 'aaaa', 2";
+        let mut rs = conn.execute(&text, &[]).unwrap();
+        assert!(rs.next());
+        assert_eq!(rs.get_string(0).unwrap().unwrap(), "aaaa");
+        assert_eq!(rs.get_i32(1).unwrap().unwrap(), 2);
+        assert!(!rs.next());
     }
 
 }
