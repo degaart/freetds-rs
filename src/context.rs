@@ -70,7 +70,7 @@ impl Drop for CSContext {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Context {
     pub ctx: Rc<CSContext>
 }
