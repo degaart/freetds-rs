@@ -698,8 +698,7 @@ mod tests {
     use crate::{CS_CLIENTCHARSET, CS_USERNAME, CS_PASSWORD, CS_DATABASE, CS_TDS_VERSION, CS_LOGIN_TIMEOUT, CS_TDS_50};
     use super::Connection;
 
-    #[test]
-    fn test_select() {
+    fn connect() -> (Context, Connection) {
         let ctx = Context::new();
         unsafe {
             debug1(ctx.ctx.handle);
@@ -713,6 +712,13 @@ mod tests {
         conn.set_props(CS_TDS_VERSION, Property::I32(CS_TDS_50 as i32)).unwrap();
         conn.set_props(CS_LOGIN_TIMEOUT, Property::I32(5)).unwrap();
         conn.connect("***REMOVED***:2025").unwrap();
+
+        (ctx, conn)
+    }
+
+    #[test]
+    fn test_select() {
+        let (_, mut conn) = connect();
 
         let text = 
             "select 'aaaa', \
@@ -750,20 +756,7 @@ mod tests {
 
     #[test]
     fn test_params() {
-        let ctx = Context::new();
-        unsafe {
-            debug1(ctx.ctx.handle);
-        }
-
-        let mut conn = Connection::new(&ctx);
-        conn.set_props(CS_CLIENTCHARSET, Property::String("UTF-8")).unwrap();
-        conn.set_props(CS_USERNAME, Property::String("sa")).unwrap();
-        conn.set_props(CS_PASSWORD, Property::String("")).unwrap();
-        conn.set_props(CS_DATABASE, Property::String("***REMOVED***")).unwrap();
-        conn.set_props(CS_TDS_VERSION, Property::I32(CS_TDS_50 as i32)).unwrap();
-        conn.set_props(CS_LOGIN_TIMEOUT, Property::I32(5)).unwrap();
-        conn.connect("***REMOVED***:2025").unwrap();
-
+        let (_, mut conn) = connect();
         let text = "\
             create table #test(\
                 col1 varchar(10), \
@@ -826,5 +819,19 @@ mod tests {
         assert_eq!("bbb", rs.get_string(6).unwrap().unwrap());
     }
 
+    #[test]
+    fn test_multiple_rows() {
+        let (_, mut conn) = connect();
+
+        let text = "select 1 union select 2 union select 3";
+        let mut rs = conn.execute(text, &[]).unwrap();
+        assert!(rs.next());
+        assert_eq!(1, rs.get_i32(0).unwrap().unwrap());
+        assert!(rs.next());
+        assert_eq!(2, rs.get_i32(0).unwrap().unwrap());
+        assert!(rs.next());
+        assert_eq!(3, rs.get_i32(0).unwrap().unwrap());
+        assert!(!rs.next());
+    }
 }
 
