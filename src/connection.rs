@@ -2,7 +2,7 @@ use std::{ptr, mem, ffi::CString, rc::Rc};
 use freetds_sys::*;
 use crate::command::CommandArg;
 use crate::{context::Context, property::Property, Result, error::err, error::Error, command::Command};
-use crate::statement::{ToSql, Null};
+use crate::to_sql::ToSql;
 
 #[derive(PartialEq, Debug)]
 enum TextPiece {
@@ -693,7 +693,9 @@ impl Connection {
 mod tests {
     use freetds_sys::CS_DATEREC;
 
+    use crate::connection::TextPiece;
     use crate::property::Property;
+    use crate::to_sql::ToSql;
     use crate::{context::Context, debug1};
     use crate::{CS_CLIENTCHARSET, CS_USERNAME, CS_PASSWORD, CS_DATABASE, CS_TDS_VERSION, CS_LOGIN_TIMEOUT, CS_TDS_50};
     use super::Connection;
@@ -833,5 +835,55 @@ mod tests {
         assert_eq!(3, rs.get_i32(0).unwrap().unwrap());
         assert!(!rs.next());
     }
+
+    #[test]
+    fn test_parse_query() {
+        let s = "?, '?', ?, \"?\", ? /* que? */, ? -- ?no?";
+        let query = Connection::parse_query(s);
+        assert_eq!(query.text, s);
+        assert_eq!(query.pieces.len(), 8);
+        assert_eq!(query.param_count, 4);
+
+        let concated: String = query.pieces.iter().map(
+            |p| match p {
+                TextPiece::Literal(s) => {
+                    &s
+                },
+                TextPiece::Placeholder => {
+                    "?"
+                }
+            })
+            .collect();
+        assert_eq!(s, concated);
+    }
+
+    #[test]
+    fn test_generate_query() {
+        let s = "string: ?, i32: ?, i64: ?, f64: ?, date: ?, image: ?";
+        let mut params: Vec<&dyn ToSql> = Vec::new();
+        params.push(&"aaa");
+        params.push(&1i32);
+        params.push(&2i64);
+        params.push(&3.14f64);
+
+        let param5 = CS_DATEREC {
+            dateyear: 1986,
+            datemonth: 6,
+            datedmonth: 5,
+            datehour: 10,
+            dateminute: 30,
+            datesecond: 31,
+            ..Default::default()
+        };
+        params.push(&param5);
+
+        let param6 = vec![0xDE_u8, 0xAD_u8, 0xBE_u8, 0xEF_u8];
+        params.push(&param6);
+
+        let parsed_query = Connection::parse_query(s);
+        let generated = Connection::generate_query(&parsed_query, &params);
+        assert_eq!("string: 'aaa', i32: 1, i64: 2, f64: 3.14, date: '1986/07/05 10:30:31.0', image: 0xDEADBEEF", generated);
+    }
+
 }
 
