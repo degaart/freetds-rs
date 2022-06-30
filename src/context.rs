@@ -34,7 +34,6 @@ pub struct CSContext {
 impl CSContext {
     fn new() -> Self {
         unsafe {
-            println!("CSContext::new");
             let mut ctx: *mut CS_CONTEXT = ptr::null_mut();
             let ret = cs_ctx_alloc(CS_VERSION_125, &mut ctx);
             if ret != CS_SUCCEED {
@@ -55,7 +54,6 @@ impl CSContext {
 
 impl Drop for CSContext {
     fn drop(&mut self) {
-        println!("CSContext::drop");
         unsafe {
             let ret = ct_exit(self.handle, CS_UNUSED);
             if ret != CS_SUCCEED {

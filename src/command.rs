@@ -12,7 +12,6 @@ pub struct CSCommand {
 
 impl CSCommand {
     pub fn new(conn: &CSConnection) -> Self {
-        println!("CSCommand::new");
         unsafe {
             let mut cmd: *mut CS_COMMAND = ptr::null_mut();
             let ret = ct_cmd_alloc(conn.handle, &mut cmd);
@@ -28,7 +27,6 @@ impl CSCommand {
 
 impl Drop for CSCommand {
     fn drop(&mut self) {
-        println!("CSCommand::drop");
         unsafe {
             let ret = ct_cmd_drop(self.handle);
             if ret != CS_SUCCEED {
