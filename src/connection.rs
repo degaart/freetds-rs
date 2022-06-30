@@ -541,7 +541,6 @@ impl Connection {
 
     pub fn connect(&mut self, server_name: impl AsRef<str>) -> Result<()> {
         unsafe {
-            /* TODO: Handle timeout correctly (freetds does not implement it) */
             self.diag_clear();
             let server_name = CString::new(server_name.as_ref())?;
             let ret = ct_connect(
@@ -671,9 +670,6 @@ impl Connection {
         Ok(Rows::new(columns, rows))
     }
 
-    /*
-        TODO: Handle string quoting '''' and """"
-    */
     fn parse_query(text: impl AsRef<str>) -> ParsedQuery {
         let mut pieces: Vec<TextPiece> = Vec::new();
         let mut param_count: i32 = 0;
@@ -987,6 +983,17 @@ mod tests {
             })
             .collect();
         assert_eq!(s, concated);
+    }
+
+    #[test]
+    fn test_quotes() {
+        let (_, mut conn) = connect();
+        let mut rs = conn
+            .execute("select '''ab''', ?", &[&"\'cd\'"])
+            .unwrap();
+        assert!(rs.next());
+        assert_eq!("\'ab\'", rs.get_string(0).unwrap().unwrap());
+        assert_eq!("\'cd\'", rs.get_string(1).unwrap().unwrap());
     }
 
     #[test]
