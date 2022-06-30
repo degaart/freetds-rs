@@ -1,6 +1,6 @@
-use std::{ptr, rc::Rc, mem, f32::consts::E, ffi::{c_void, CStr}};
+use std::{ptr, rc::Rc, mem, ffi::CStr};
 use freetds_sys::*;
-use crate::{Result, error::err, error::Error};
+use crate::{Result, error::Error};
 
 pub enum CSDateTime {
     DateOrTime(i32),

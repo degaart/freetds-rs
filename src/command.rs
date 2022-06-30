@@ -4,7 +4,7 @@ use std::{ptr, rc::Rc};
 use freetds_sys::*;
 use crate::connection::{CSConnection, Connection};
 use crate::Result;
-use crate::error::{Error, err};
+use crate::error::Error;
 
 pub struct CSCommand {
     handle: *mut CS_COMMAND
