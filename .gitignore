@@ -4,3 +4,4 @@ target
 ._*
 .vscode
 *.bak
+Cargo.lock
