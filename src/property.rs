@@ -9,5 +9,6 @@ pub enum Property<'a> {
     ClientMsgCallback(ClientMsgCallbackType),
     ServerMsgCallback(ServerMsgCallbackType),
     I32(i32),
+    U32(u32),
     String(&'a str),
 }
