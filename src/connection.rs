@@ -429,31 +429,102 @@ impl Connection {
         }
     }
 
-    pub fn set_props(&mut self, property: u32, value: Property) -> Result<()> {
+    pub fn set_client_charset(&mut self, charset: impl AsRef<str>) -> Result<()> {
+        self.set_props(CS_CLIENTCHARSET, Property::String(charset.as_ref()))
+    }
+
+    pub fn set_username(&mut self, username: impl AsRef<str>) -> Result<()> {
+        self.set_props(CS_USERNAME, Property::String(username.as_ref()))
+    }
+
+    pub fn set_password(&mut self, password: impl AsRef<str>) -> Result<()> {
+        self.set_props(CS_PASSWORD, Property::String(password.as_ref()))
+    }
+
+    pub fn set_database(&mut self, database: impl AsRef<str>) -> Result<()> {
+        self.set_props(CS_DATABASE, Property::String(database.as_ref()))
+    }
+
+    pub fn set_tds_version_auto(&mut self) -> Result<()> {
+        self.set_props(CS_TDS_VERSION, Property::U32(CS_TDS_AUTO))
+    }
+
+    pub fn set_tds_version_40(&mut self) -> Result<()> {
+        self.set_props(CS_TDS_VERSION, Property::U32(CS_TDS_40))
+    }
+
+    pub fn set_tds_version_42(&mut self) -> Result<()> {
+        self.set_props(CS_TDS_VERSION, Property::U32(CS_TDS_42))
+    }
+
+    pub fn set_tds_version_495(&mut self) -> Result<()> {
+        self.set_props(CS_TDS_VERSION, Property::U32(CS_TDS_495))
+    }
+
+    pub fn set_tds_version_50(&mut self) -> Result<()> {
+        self.set_props(CS_TDS_VERSION, Property::U32(CS_TDS_50))
+    }
+
+    pub fn set_tds_version_70(&mut self) -> Result<()> {
+        self.set_props(CS_TDS_VERSION, Property::U32(CS_TDS_70))
+    }
+
+    pub fn set_tds_version_71(&mut self) -> Result<()> {
+        self.set_props(CS_TDS_VERSION, Property::U32(CS_TDS_71))
+    }
+
+    pub fn set_tds_version_72(&mut self) -> Result<()> {
+        self.set_props(CS_TDS_VERSION, Property::U32(CS_TDS_72))
+    }
+
+    pub fn set_tds_version_73(&mut self) -> Result<()> {
+        self.set_props(CS_TDS_VERSION, Property::U32(CS_TDS_73))
+    }
+
+    pub fn set_tds_version_74(&mut self) -> Result<()> {
+        self.set_props(CS_TDS_VERSION, Property::U32(CS_TDS_74))
+    }
+
+    pub fn set_login_timeout(&mut self, timeout: i32) -> Result<()> {
+        self.set_props(CS_LOGIN_TIMEOUT, Property::I32(timeout))
+    }
+
+    pub fn set_timeout(&mut self, timeout: i32) -> Result<()> {
+        self.set_props(CS_TIMEOUT, Property::I32(timeout))
+    }
+
+    fn set_props(&mut self, property: u32, value: Property) -> Result<()> {
         self.diag_clear();
         unsafe {
             let ret;
             match value {
                 Property::I32(mut i) => {
-                    let mut outlen: i32 = Default::default();
                     ret = ct_con_props(
                         self.conn.handle,
                         CS_SET,
                         property as CS_INT,
                         std::mem::transmute(&mut i),
                         mem::size_of::<i32>() as i32,
-                        &mut outlen);
+                        ptr::null_mut());
+                },
+                Property::U32(mut i) => {
+                    ret = ct_con_props(
+                        self.conn.handle,
+                        CS_SET,
+                        property as CS_INT,
+                        std::mem::transmute(&mut i),
+                        mem::size_of::<u32>() as i32,
+                        ptr::null_mut());
                 },
                 Property::String(s) => {
                     let s1 = CString::new(s)?;
-                    let mut outlen: i32 = Default::default();
                     ret = ct_con_props(
                         self.conn.handle,
                         CS_SET,
                         property as CS_INT,
                         std::mem::transmute(s1.as_ptr()),
                         s.len() as i32,
-                        &mut outlen);
+                        ptr::null_mut());
                 },
                 _ => {
                     return err!("Invalid argument");
@@ -757,25 +828,22 @@ impl Connection {
 
 #[cfg(test)]
 mod tests {
-    use freetds_sys::{CS_DATEREC, CS_TIMEOUT};
-
+    use freetds_sys::CS_DATEREC;
     use crate::connection::TextPiece;
-    use crate::property::Property;
     use crate::to_sql::ToSql;
     use crate::context::Context;
-    use crate::{CS_CLIENTCHARSET, CS_USERNAME, CS_PASSWORD, CS_DATABASE, CS_TDS_VERSION, CS_LOGIN_TIMEOUT, CS_TDS_50};
     use super::Connection;
 
     fn connect() -> (Context, Connection) {
         let ctx = Context::new();
         let mut conn = Connection::new(&ctx);
-        conn.set_props(CS_CLIENTCHARSET, Property::String("UTF-8")).unwrap();
-        conn.set_props(CS_USERNAME, Property::String("sa")).unwrap();
-        conn.set_props(CS_PASSWORD, Property::String("")).unwrap();
-        conn.set_props(CS_DATABASE, Property::String("***REMOVED***")).unwrap();
-        conn.set_props(CS_TDS_VERSION, Property::I32(CS_TDS_50 as i32)).unwrap();
-        conn.set_props(CS_LOGIN_TIMEOUT, Property::I32(5)).unwrap();
-        conn.set_props(CS_TIMEOUT, Property::I32(5)).unwrap();
+        conn.set_client_charset("UTF-8").unwrap();
+        conn.set_username("sa").unwrap();
+        conn.set_password("").unwrap();
+        conn.set_database("***REMOVED***").unwrap();
+        conn.set_tds_version_50().unwrap();
+        conn.set_login_timeout(5).unwrap();
+        conn.set_timeout(5).unwrap();
         conn.connect("***REMOVED***:2025").unwrap();
 
         (ctx, conn)
@@ -974,5 +1042,6 @@ mod tests {
             .execute("drop table freetds_rs_test", &[])
             .unwrap();
     }
+
 }
 
