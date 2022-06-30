@@ -1,4 +1,4 @@
-use freetds_sys::CS_DATEREC;
+use chrono::{NaiveDateTime, NaiveDate, NaiveTime};
 use crate::null::Null;
 
 pub trait ToSql {
@@ -45,16 +45,21 @@ impl ToSql for f64 {
     }
 }
 
-impl ToSql for CS_DATEREC {
+impl ToSql for NaiveDateTime {
     fn to_sql(&self) -> String {
-        format!("'{:04}/{:02}/{:02} {:02}:{:02}:{:02}.{}'",
-            self.dateyear,
-            self.datemonth + 1,
-            self.datedmonth,
-            self.datehour,
-            self.dateminute,
-            self.datesecond,
-            self.datesecfrac)
+        self.format("'%Y/%m/%d %H:%M:%S%.f'").to_string()
+    }
+}
+
+impl ToSql for NaiveDate {
+    fn to_sql(&self) -> String {
+        self.format("'%Y/%m/%d'").to_string()
+    }
+}
+
+impl ToSql for NaiveTime {
+    fn to_sql(&self) -> String {
+        self.format("%H:%M:%S%.f").to_string()
     }
 }
 

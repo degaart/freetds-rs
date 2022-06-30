@@ -1,5 +1,6 @@
-use std::ffi::{c_void, CStr};
+use std::ffi::CStr;
 use std::{ptr, mem, ffi::CString, rc::Rc};
+use chrono::{NaiveDate, NaiveTime, NaiveDateTime};
 use freetds_sys::*;
 use crate::command::CommandArg;
 use crate::{context::Context, property::Property, Result, error::err, error::Error, command::Command};
@@ -159,7 +160,7 @@ impl ResultSet {
         }
     }
 
-    fn get_i64(&mut self, col: impl TryInto<usize>) -> Result<Option<i64>> {
+    pub fn get_i64(&mut self, col: impl TryInto<usize>) -> Result<Option<i64>> {
         self.convert_buffer(col, |ctx, buffer, fmt| {
             match fmt.datatype {
                 CS_LONG_TYPE => {
@@ -192,7 +193,7 @@ impl ResultSet {
         })
     }
 
-    fn get_i32(&mut self, col: impl TryInto<usize>) -> Result<Option<i32>> {
+    pub fn get_i32(&mut self, col: impl TryInto<usize>) -> Result<Option<i32>> {
         self.convert_buffer(col, |ctx, buffer, fmt| {
             match fmt.datatype {
                 CS_INT_TYPE => {
@@ -225,7 +226,7 @@ impl ResultSet {
         })
     }
 
-    fn get_f64(&mut self, col: impl TryInto<usize>) -> Result<Option<f64>> {
+    pub fn get_f64(&mut self, col: impl TryInto<usize>) -> Result<Option<f64>> {
         self.convert_buffer(col, |ctx, buffer, fmt| {
             match fmt.datatype {
                 CS_FLOAT_TYPE => {
@@ -258,7 +259,7 @@ impl ResultSet {
         })
     }
 
-    fn get_string(&mut self, col: impl TryInto<usize>) -> Result<Option<String>> {
+    pub fn get_string(&mut self, col: impl TryInto<usize>) -> Result<Option<String>> {
         self.convert_buffer(col, |ctx, buffer, fmt| {
             match fmt.datatype {
                 CS_CHAR_TYPE | CS_LONGCHAR_TYPE | CS_VARCHAR_TYPE | CS_UNICHAR_TYPE | CS_TEXT_TYPE | CS_UNITEXT_TYPE => {
@@ -290,7 +291,7 @@ impl ResultSet {
         })
     }
 
-    fn get_date(&mut self, col: impl TryInto<usize>) -> Result<Option<CS_DATEREC>> {
+    fn get_daterec(&mut self, col: impl TryInto<usize>) -> Result<Option<CS_DATEREC>> {
         self.convert_buffer(col, |ctx, buffer, fmt| {
             match fmt.datatype {
                 CS_DATE_TYPE => {
@@ -345,7 +346,48 @@ impl ResultSet {
         })
     }
     
-    fn get_blob(&mut self, col: impl TryInto<usize>) -> Result<Option<Vec<u8>>> {
+    pub fn get_date(&mut self, col: impl TryInto<usize>) -> Result<Option<NaiveDate>> {
+        match self.get_daterec(col)? {
+            None => Ok(None),
+            Some(date_rec) => {
+                Ok(Some(NaiveDate::from_ymd(
+                    date_rec.dateyear,
+                    (date_rec.datemonth + 1) as u32,
+                    date_rec.datedmonth as u32)))
+            }
+        }
+    }
+
+    pub fn get_time(&mut self, col: impl TryInto<usize>) -> Result<Option<NaiveTime>> {
+        match self.get_daterec(col)? {
+            None => Ok(None),
+            Some(date_rec) => {
+                Ok(Some(NaiveTime::from_hms_milli(
+                    date_rec.datehour as u32, 
+                    date_rec.dateminute as u32, 
+                    date_rec.datesecond as u32, 
+                    date_rec.datemsecond as u32)))
+            }
+        }
+    }
+
+    pub fn get_datetime(&mut self, col: impl TryInto<usize>) -> Result<Option<NaiveDateTime>> {
+        match self.get_daterec(col)? {
+            None => Ok(None),
+            Some(date_rec) => {
+                let date = NaiveDate::from_ymd(
+                    date_rec.dateyear,
+                    (date_rec.datemonth + 1) as u32,
+                    date_rec.datedmonth as u32);
+                Ok(Some(date.and_hms_milli(date_rec.datehour as u32, 
+                    date_rec.dateminute as u32, 
+                    date_rec.datesecond as u32, 
+                    date_rec.datemsecond as u32)))
+            }
+        }
+    }
+
+    pub fn get_blob(&mut self, col: impl TryInto<usize>) -> Result<Option<Vec<u8>>> {
         self.convert_buffer(col, |ctx, buffer, fmt| {
             match fmt.datatype {
                 CS_BINARY_TYPE | CS_LONGBINARY_TYPE | CS_IMAGE_TYPE => {
@@ -824,7 +866,7 @@ impl Connection {
 
 #[cfg(test)]
 mod tests {
-    use freetds_sys::CS_DATEREC;
+    use chrono::NaiveDate;
     use crate::connection::TextPiece;
     use crate::to_sql::ToSql;
     use crate::context::Context;
@@ -865,18 +907,7 @@ mod tests {
         assert_eq!(rs.get_i32(1).unwrap().unwrap(), 2);
         assert_eq!(rs.get_i64(2).unwrap().unwrap(), 5000000000);
         assert_eq!(rs.get_f64(3).unwrap().unwrap(), 3.14);
-        assert_eq!(rs.get_date(4).unwrap().unwrap(), CS_DATEREC {
-            dateyear: 1986,
-            datemonth: 6,
-            datedmonth: 5,
-            datehour: 10,
-            dateminute: 30,
-            datesecond: 31,
-            datedyear: 186,
-            datedweek: 6,
-            datemsecond: 100,
-            ..Default::default()
-        });
+        assert_eq!(rs.get_datetime(4).unwrap().unwrap(), NaiveDate::from_ymd(1986, 7, 5).and_hms_milli(10, 30, 31, 100));
         assert_eq!(rs.get_f64(5).unwrap().unwrap(), 3.14);
         assert_eq!(rs.get_blob(6).unwrap().unwrap(), vec![0xDE, 0xAD, 0xBE, 0xEF]);
         assert_eq!(rs.get_string(7).unwrap().unwrap(), "ccc".to_string());
@@ -907,18 +938,7 @@ mod tests {
                 &2i32,
                 &5000000000i64,
                 &3.14f64,
-                &CS_DATEREC {
-                    dateyear: 1986,
-                    datemonth: 6,
-                    datedmonth: 5,
-                    datehour: 10,
-                    dateminute: 30,
-                    datesecond: 31,
-                    datedyear: 186,
-                    datedweek: 6,
-                    datemsecond: 100,
-                    ..Default::default()
-                },
+                &NaiveDate::from_ymd(1986, 7, 5).and_hms_milli(10, 30, 31, 100),
                 &vec![0xDEu8, 0xADu8, 0xBEu8, 0xEFu8],
                 &"bbb"
             ])
@@ -933,18 +953,7 @@ mod tests {
         assert_eq!(2, rs.get_i32(1).unwrap().unwrap());
         assert_eq!(5000000000, rs.get_i64(2).unwrap().unwrap());
         assert_eq!(3.14, rs.get_f64(3).unwrap().unwrap());
-        assert_eq!(CS_DATEREC {
-            dateyear: 1986,
-            datemonth: 6,
-            datedmonth: 5,
-            datehour: 10,
-            dateminute: 30,
-            datesecond: 31,
-            datedyear: 186,
-            datedweek: 6,
-            datemsecond: 0,
-            ..Default::default()
-        }, rs.get_date(4).unwrap().unwrap());
+        assert_eq!(NaiveDate::from_ymd(1986, 7, 5).and_hms_milli(10, 30, 31, 100), rs.get_datetime(4).unwrap().unwrap());
         assert_eq!(vec![0xDEu8, 0xADu8, 0xBEu8, 0xEFu8], rs.get_blob(5).unwrap().unwrap());
         assert_eq!("bbb", rs.get_string(6).unwrap().unwrap());
     }
@@ -1005,15 +1014,7 @@ mod tests {
         params.push(&2i64);
         params.push(&3.14f64);
 
-        let param5 = CS_DATEREC {
-            dateyear: 1986,
-            datemonth: 6,
-            datedmonth: 5,
-            datehour: 10,
-            dateminute: 30,
-            datesecond: 31,
-            ..Default::default()
-        };
+        let param5 = NaiveDate::from_ymd(1986, 7, 5).and_hms(10, 30, 31);
         params.push(&param5);
 
         let param6 = vec![0xDE_u8, 0xAD_u8, 0xBE_u8, 0xEF_u8];
@@ -1021,7 +1022,7 @@ mod tests {
 
         let parsed_query = Connection::parse_query(s);
         let generated = Connection::generate_query(&parsed_query, &params);
-        assert_eq!("string: 'aaa', i32: 1, i64: 2, f64: 3.14, date: '1986/07/05 10:30:31.0', image: 0xDEADBEEF", generated);
+        assert_eq!("string: 'aaa', i32: 1, i64: 2, f64: 3.14, date: '1986/07/05 10:30:31', image: 0xDEADBEEF", generated);
     }
 
     #[test]
