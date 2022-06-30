@@ -385,7 +385,6 @@ pub struct CSConnection {
 
 impl CSConnection {
     pub fn new(ctx: *mut CS_CONTEXT) -> Self {
-        println!("CSConnection::new");
         unsafe {
             let mut conn: *mut CS_CONNECTION = ptr::null_mut();
             let ret = ct_con_alloc(ctx, &mut conn);
@@ -404,7 +403,6 @@ impl CSConnection {
 
 impl Drop for CSConnection {
     fn drop(&mut self) {
-        println!("CSConnection::drop");
         unsafe {
             let ret = ct_con_drop(self.handle);
             if ret != CS_SUCCEED {
