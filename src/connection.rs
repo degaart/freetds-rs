@@ -1,3 +1,4 @@
+use std::ffi::{c_void, CStr};
 use std::{ptr, mem, ffi::CString, rc::Rc};
 use freetds_sys::*;
 use crate::command::CommandArg;
@@ -421,10 +422,73 @@ pub struct Connection {
 
 impl Connection {
     pub fn new(ctx: &Context) -> Self {
-        Self {
-            ctx: ctx.clone(),
-            conn: Rc::new(CSConnection::new(ctx.ctx.handle))
+        let ctx = ctx.clone();
+        let conn = Rc::new(CSConnection::new(ctx.ctx.handle));
+
+        unsafe {
+            let ret = cs_config(
+                ctx.ctx.handle,
+                CS_SET,
+                CS_MESSAGE_CB,
+                Self::csmsg_fn as *mut c_void,
+                CS_UNUSED,
+                ptr::null_mut());
+            assert_eq!(CS_SUCCEED, ret);
+
+            let ret = ct_callback(
+                ptr::null_mut(),
+                conn.handle,
+                CS_SET,
+                CS_SERVERMSG_CB,
+                Self::servermsg_fn as *mut c_void);
+            assert_eq!(CS_SUCCEED, ret);
+
+            let ret = ct_callback(
+                ptr::null_mut(),
+                conn.handle,
+                CS_SET,
+                CS_CLIENTMSG_CB,
+                Self::clientmsg_fn as *mut c_void);
+            assert_eq!(CS_SUCCEED, ret);
         }
+
+        Self {
+            ctx,
+            conn,
+        }
+    }
+
+    extern "C" fn csmsg_fn(_ctx: *const CS_CONTEXT, msg: *const CS_CLIENTMSG) -> CS_RETCODE {
+        let number;
+        let text;
+        unsafe {
+            text = CStr::from_ptr(mem::transmute((*msg).msgstring.as_ptr())).to_string_lossy().trim().to_string();
+            number = (*msg).msgnumber & 0xFF;
+        }
+        println!("CS{:04}: {}", number, text);
+        return CS_SUCCEED;
+    }
+
+    extern "C" fn servermsg_fn(_ctx: *const CS_CONTEXT, _conn: *const CS_CONNECTION, msg: *const CS_SERVERMSG) -> CS_RETCODE {
+        let text;
+        let msgnumber;
+        unsafe {
+            text = CStr::from_ptr(mem::transmute((*msg).text.as_ptr())).to_string_lossy().trim().to_string();
+            msgnumber = (*msg).msgnumber;
+        }
+        println!("SRV{:04}: {}", msgnumber, text);
+        return CS_SUCCEED;
+    }
+
+    extern "C" fn clientmsg_fn(_ctx: *const CS_CONTEXT, _conn: *const CS_CONNECTION, msg: *const CS_CLIENTMSG) -> CS_RETCODE {
+        let text;
+        let msgnumber;
+        unsafe {
+            text = CStr::from_ptr(mem::transmute((*msg).msgstring.as_ptr())).to_string_lossy().trim().to_string();
+            msgnumber = (*msg).msgnumber;
+        }
+        println!("CLT{:04}: {}", msgnumber, text);
+        return CS_SUCCEED;
     }
 
     pub fn set_props(&mut self, property: u32, value: Property) -> Result<()> {
@@ -467,6 +531,7 @@ impl Connection {
 
     pub fn connect(&mut self, server_name: impl AsRef<str>) -> Result<()> {
         unsafe {
+            /* TODO: Handle timeout correctly (freetds does not implement it) */
             let server_name = CString::new(server_name.as_ref())?;
             let ret = ct_connect(
                 self.conn.handle,
@@ -691,20 +756,20 @@ impl Connection {
 
 #[cfg(test)]
 mod tests {
-    use freetds_sys::CS_DATEREC;
+    use freetds_sys::{CS_DATEREC, CS_TIMEOUT, CS_MAX_CONNECT};
 
     use crate::connection::TextPiece;
     use crate::property::Property;
     use crate::to_sql::ToSql;
-    use crate::{context::Context, debug1};
+    use crate::context::Context;
     use crate::{CS_CLIENTCHARSET, CS_USERNAME, CS_PASSWORD, CS_DATABASE, CS_TDS_VERSION, CS_LOGIN_TIMEOUT, CS_TDS_50};
     use super::Connection;
 
     fn connect() -> (Context, Connection) {
         let ctx = Context::new();
-        unsafe {
-            debug1(ctx.ctx.handle);
-        }
+        // unsafe {
+        //     debug1(ctx.ctx.handle);
+        // }
 
         let mut conn = Connection::new(&ctx);
         conn.set_props(CS_CLIENTCHARSET, Property::String("UTF-8")).unwrap();
@@ -713,6 +778,8 @@ mod tests {
         conn.set_props(CS_DATABASE, Property::String("***REMOVED***")).unwrap();
         conn.set_props(CS_TDS_VERSION, Property::I32(CS_TDS_50 as i32)).unwrap();
         conn.set_props(CS_LOGIN_TIMEOUT, Property::I32(5)).unwrap();
+        conn.set_props(CS_TIMEOUT, Property::I32(5)).unwrap();
+        conn.set_props(CS_MAX_CONNECT, Property::I32(5)).unwrap();
         conn.connect("***REMOVED***:2025").unwrap();
 
         (ctx, conn)

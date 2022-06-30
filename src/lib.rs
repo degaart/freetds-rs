@@ -15,8 +15,6 @@ extern "C" {
     fn debug1(ctx: *mut CS_CONTEXT) -> i32;
 }
 
-
-
 #[cfg(test)]
 mod tests {
     
