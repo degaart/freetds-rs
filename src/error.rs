@@ -78,12 +78,3 @@ macro_rules! err {
 use std::fmt::Display;
 
 pub(crate) use err;
-
-macro_rules! succeeded {
-    ($code:ident, $fn_name:ident) => {
-        if $code != CS_SUCCEED {
-            return Err(Error::new($code, stringify!($fn_name)))
-        }
-    };
-}
-pub(crate) use succeeded;
