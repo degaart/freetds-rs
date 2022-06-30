@@ -759,7 +759,7 @@ impl Connection {
 
 #[cfg(test)]
 mod tests {
-    use freetds_sys::{CS_DATEREC, CS_TIMEOUT, CS_MAX_CONNECT};
+    use freetds_sys::{CS_DATEREC, CS_TIMEOUT};
 
     use crate::connection::TextPiece;
     use crate::property::Property;
@@ -778,7 +778,6 @@ mod tests {
         conn.set_props(CS_TDS_VERSION, Property::I32(CS_TDS_50 as i32)).unwrap();
         conn.set_props(CS_LOGIN_TIMEOUT, Property::I32(5)).unwrap();
         conn.set_props(CS_TIMEOUT, Property::I32(5)).unwrap();
-        conn.set_props(CS_MAX_CONNECT, Property::I32(5)).unwrap();
         conn.connect("***REMOVED***:2025").unwrap();
 
         (ctx, conn)
@@ -952,5 +951,30 @@ mod tests {
         assert_eq!("string: 'aaa', i32: 1, i64: 2, f64: 3.14, date: '1986/07/05 10:30:31.0', image: 0xDEADBEEF", generated);
     }
 
+    #[test]
+    fn test_utf8() {
+        let (_, mut conn) = connect();
+
+        conn
+            .execute("if not exists(select id from sysobjects where type='U' and name='freetds_rs_test') execute('create table freetds_rs_test(c varchar(10))')", &[])
+            .unwrap();
+        conn
+            .execute("insert into freetds_rs_test(c) values(?)", &[ &"éçàèä" ])
+            .unwrap();
+        
+        let text = "select c from freetds_rs_test";
+        let mut rs = conn.execute(&text, &[]).unwrap();
+        assert!(rs.next());
+        assert_eq!(rs.get_string(0).unwrap().unwrap(), "éçàèä");
+
+        let text = "select 'éçàèä'";
+        let mut rs = conn.execute(&text, &[]).unwrap();
+        assert!(rs.next());
+        assert_eq!(rs.get_string(0).unwrap().unwrap(), "éçàèä");
+
+        conn
+            .execute("drop table freetds_rs_test", &[])
+            .unwrap();
+    }
 }
 
