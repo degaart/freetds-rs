@@ -1,6 +1,6 @@
-use std::{ptr, rc::Rc, mem};
+use std::{ptr, rc::Rc, mem, f32::consts::E, ffi::{c_void, CStr}};
 use freetds_sys::*;
-use crate::{Result, error::err, error::{Error, succeeded}};
+use crate::{Result, error::err, error::Error};
 
 pub enum CSDateTime {
     DateOrTime(i32),
@@ -77,14 +77,17 @@ pub struct Context {
 
 impl Context {
     pub fn new() -> Self {
+        let ctx = CSContext::new();
+        Self::diag_init(ctx.handle);
         Self {
-            ctx: Rc::new(CSContext::new())
+            ctx: Rc::new(ctx)
         }
     }
 
     pub fn convert(&mut self, srcfmt: &CS_DATAFMT, srcdata: &[u8], dstfmt: &CS_DATAFMT, dstdata: &mut [u8]) -> Result<usize> {
         unsafe {
             let mut dstlen: i32 = Default::default();
+            self.diag_clear();
             let ret = cs_convert(
                 self.ctx.handle,
                 mem::transmute(srcfmt as *const CS_DATAFMT),
@@ -93,7 +96,7 @@ impl Context {
                 mem::transmute(dstdata.as_mut_ptr()),
                 &mut dstlen);
             if ret != CS_SUCCEED {
-                err!(ret, cs_convert)
+                Err(self.get_error().unwrap_or(Error::from_message("cs_convert failed")))
             } else {
                 Ok(dstlen as usize)
             }
@@ -103,7 +106,9 @@ impl Context {
     unsafe fn dt_crack_unsafe<T>(&mut self, type_: i32, dateval: *const T) -> Result<CS_DATEREC> {
         let mut daterec: CS_DATEREC = Default::default();
         let ret = cs_dt_crack(self.ctx.handle, type_, mem::transmute(dateval), &mut daterec);
-        succeeded!(ret, cs_dt_crack);
+        if ret != CS_SUCCEED {
+            return Err(self.get_error().unwrap_or(Error::from_message("cs_dt_crack failed")));
+        }
         Ok(daterec)
     }
 
@@ -128,6 +133,47 @@ impl Context {
     pub fn crack_smalldatetime(&mut self, val: CS_DATETIME4) -> Result<CS_DATEREC> {
         unsafe {
             self.dt_crack_unsafe(CS_DATETIME4_TYPE, &val)
+        }
+    }
+
+    fn diag_init(ctx: *mut CS_CONTEXT) {
+        unsafe {
+            let ret = cs_diag(ctx, CS_INIT, CS_UNUSED, CS_UNUSED, ptr::null_mut());
+            assert_eq!(CS_SUCCEED, ret);
+        }
+    }
+
+    fn diag_clear(&mut self) {
+        unsafe {
+            let ret = cs_diag(self.ctx.handle, CS_CLEAR, CS_CLIENTMSG_TYPE, CS_UNUSED, ptr::null_mut());
+            assert_eq!(CS_SUCCEED, ret);
+        }
+    }
+
+    fn diag_get(&mut self) -> Vec<String> {
+        let mut result = Vec::new();
+        unsafe {
+            let count: i32 = Default::default();
+            let ret = cs_diag(self.ctx.handle, CS_STATUS, CS_UNUSED, CS_UNUSED, mem::transmute(&count));
+            assert_eq!(CS_SUCCEED, ret);
+            
+            for i in 0..count {
+                let mut buffer: CS_CLIENTMSG = Default::default();
+                let ret = cs_diag(self.ctx.handle, CS_GET, CS_CLIENTMSG_TYPE, i, mem::transmute(&mut buffer));
+                assert_eq!(CS_SUCCEED, ret);
+
+                result.push(CStr::from_ptr(buffer.msgstring.as_ptr()).to_string_lossy().trim_end().to_string())
+            }
+        }
+        result
+    }
+
+    fn get_error(&mut self) -> Option<Error> {
+        let errors = self.diag_get();
+        if errors.is_empty() {
+            None
+        } else {
+            Some(Error::from_message(&errors.last().unwrap()))
         }
     }
 

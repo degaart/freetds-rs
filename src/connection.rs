@@ -424,74 +424,15 @@ impl Connection {
     pub fn new(ctx: &Context) -> Self {
         let ctx = ctx.clone();
         let conn = Rc::new(CSConnection::new(ctx.ctx.handle));
-
-        unsafe {
-            let ret = cs_config(
-                ctx.ctx.handle,
-                CS_SET,
-                CS_MESSAGE_CB,
-                Self::csmsg_fn as *mut c_void,
-                CS_UNUSED,
-                ptr::null_mut());
-            assert_eq!(CS_SUCCEED, ret);
-
-            let ret = ct_callback(
-                ptr::null_mut(),
-                conn.handle,
-                CS_SET,
-                CS_SERVERMSG_CB,
-                Self::servermsg_fn as *mut c_void);
-            assert_eq!(CS_SUCCEED, ret);
-
-            let ret = ct_callback(
-                ptr::null_mut(),
-                conn.handle,
-                CS_SET,
-                CS_CLIENTMSG_CB,
-                Self::clientmsg_fn as *mut c_void);
-            assert_eq!(CS_SUCCEED, ret);
-        }
-
+        Self::diag_init(conn.handle);
         Self {
             ctx,
             conn,
         }
     }
 
-    extern "C" fn csmsg_fn(_ctx: *const CS_CONTEXT, msg: *const CS_CLIENTMSG) -> CS_RETCODE {
-        let number;
-        let text;
-        unsafe {
-            text = CStr::from_ptr(mem::transmute((*msg).msgstring.as_ptr())).to_string_lossy().trim().to_string();
-            number = (*msg).msgnumber & 0xFF;
-        }
-        println!("CS{:04}: {}", number, text);
-        return CS_SUCCEED;
-    }
-
-    extern "C" fn servermsg_fn(_ctx: *const CS_CONTEXT, _conn: *const CS_CONNECTION, msg: *const CS_SERVERMSG) -> CS_RETCODE {
-        let text;
-        let msgnumber;
-        unsafe {
-            text = CStr::from_ptr(mem::transmute((*msg).text.as_ptr())).to_string_lossy().trim().to_string();
-            msgnumber = (*msg).msgnumber;
-        }
-        println!("SRV{:04}: {}", msgnumber, text);
-        return CS_SUCCEED;
-    }
-
-    extern "C" fn clientmsg_fn(_ctx: *const CS_CONTEXT, _conn: *const CS_CONNECTION, msg: *const CS_CLIENTMSG) -> CS_RETCODE {
-        let text;
-        let msgnumber;
-        unsafe {
-            text = CStr::from_ptr(mem::transmute((*msg).msgstring.as_ptr())).to_string_lossy().trim().to_string();
-            msgnumber = (*msg).msgnumber;
-        }
-        println!("CLT{:04}: {}", msgnumber, text);
-        return CS_SUCCEED;
-    }
-
     pub fn set_props(&mut self, property: u32, value: Property) -> Result<()> {
+        self.diag_clear();
         unsafe {
             let ret;
             match value {
@@ -524,7 +465,7 @@ impl Connection {
             if ret == CS_SUCCEED {
                 Ok(())
             } else {
-                err!("ct_con_props failed")
+                Err(self.get_error().unwrap_or(Error::from_message("ct_con_props failed")))
             }
         }
     }
@@ -532,6 +473,7 @@ impl Connection {
     pub fn connect(&mut self, server_name: impl AsRef<str>) -> Result<()> {
         unsafe {
             /* TODO: Handle timeout correctly (freetds does not implement it) */
+            self.diag_clear();
             let server_name = CString::new(server_name.as_ref())?;
             let ret = ct_connect(
                 self.conn.handle,
@@ -540,7 +482,7 @@ impl Connection {
             if ret == CS_SUCCEED {
                 Ok(())
             } else {
-                err!("ct_connect failed")
+                Err(self.get_error().unwrap_or(Error::from_message("ct_connect failed")))
             }
         }
     }
@@ -556,7 +498,10 @@ impl Connection {
         let mut results: Vec<Rows> = Vec::new();
         loop {
             let (ret, res_type) = command.results()?;
-            if !ret {
+            if let Some(error) = self.get_error() {
+                command.cancel(CS_CANCEL_ALL)?;
+                return Err(error);
+            } else if !ret {
                 break;
             }
 
@@ -752,6 +697,64 @@ impl Connection {
         }
         return result;
     }
+
+    fn diag_init(conn: *mut CS_CONNECTION) {
+        unsafe {
+            let ret = ct_diag(conn, CS_INIT, CS_UNUSED, CS_UNUSED, ptr::null_mut());
+            assert_eq!(CS_SUCCEED, ret);
+        }
+    }
+
+    pub fn diag_clear(&mut self) {
+        unsafe {
+            let ret = ct_diag(self.conn.handle, CS_CLEAR, CS_ALLMSG_TYPE, CS_UNUSED, ptr::null_mut());
+            assert_eq!(CS_SUCCEED, ret);
+        }
+    }
+
+    fn diag_get(&mut self) -> Vec<(i32,String)> {
+        let mut result = Vec::new();
+        unsafe {
+            /* Client messages */
+            let count: i32 = Default::default();
+            let ret = ct_diag(self.conn.handle, CS_STATUS, CS_CLIENTMSG_TYPE, CS_UNUSED, mem::transmute(&count));
+            assert_eq!(CS_SUCCEED, ret);
+
+            for i in 0..count {
+                let buffer: CS_CLIENTMSG = Default::default();
+                let ret = ct_diag(self.conn.handle, CS_GET, CS_CLIENTMSG_TYPE, i + 1, mem::transmute(&buffer));
+                assert_eq!(CS_SUCCEED, ret);
+
+                let msgnumber = buffer.msgnumber as i32;
+                let text = CStr::from_ptr(mem::transmute(buffer.msgstring.as_ptr())).to_string_lossy().trim_end().to_string();
+                result.push((msgnumber, text));
+            }
+
+            /* server messages */
+            let ret = ct_diag(self.conn.handle, CS_STATUS, CS_SERVERMSG_TYPE, CS_UNUSED, mem::transmute(&count));
+            assert_eq!(CS_SUCCEED, ret);
+
+            for i in 0..count {
+                let buffer: CS_SERVERMSG = Default::default();
+                let ret = ct_diag(self.conn.handle, CS_GET, CS_SERVERMSG_TYPE, i + 1, mem::transmute(&buffer));
+                assert_eq!(CS_SUCCEED, ret);
+
+                let msgnumber = buffer.msgnumber as i32;
+                let text = CStr::from_ptr(mem::transmute(buffer.text.as_ptr())).to_string_lossy().trim_end().to_string();
+                result.push((msgnumber, text));
+            }
+        }
+        result
+    }
+
+    pub fn get_error(&mut self) -> Option<Error> {
+        let errors = self.diag_get();
+        if errors.is_empty() {
+            None
+        } else {
+            Some(Error::from_message(&errors.last().unwrap().1))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -767,10 +770,6 @@ mod tests {
 
     fn connect() -> (Context, Connection) {
         let ctx = Context::new();
-        // unsafe {
-        //     debug1(ctx.ctx.handle);
-        // }
-
         let mut conn = Connection::new(&ctx);
         conn.set_props(CS_CLIENTCHARSET, Property::String("UTF-8")).unwrap();
         conn.set_props(CS_USERNAME, Property::String("sa")).unwrap();
@@ -790,7 +789,8 @@ mod tests {
         let (_, mut conn) = connect();
 
         let text = 
-            "select 'aaaa', \
+            "select \
+                'aaaa', \
                 2, 5000000000, \
                 3.14, \
                 cast('1986/07/05 10:30:31.1' as datetime), \
