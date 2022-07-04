@@ -14,9 +14,8 @@ enum TextPiece {
 }
 
 struct ParsedQuery {
-    text: String,
     pieces: Vec<TextPiece>,
-    param_count: i32
+    param_count: usize
 }
 
 #[derive(Debug, Clone, Default)]
@@ -113,6 +112,24 @@ impl ResultSet {
         }
 
         Ok(self.results[pos].columns.len())
+    }
+
+    pub fn column_name(&self, index: usize) -> Result<Option<String>> {
+        let pos = self.pos.unwrap_or(0);
+        if pos >= self.results.len() {
+            return err!("Invalid statement state");
+        }
+
+        if index >= self.results[pos].columns.len() {
+            return Err(Error::from_message("Invalid column index"));
+        }
+
+        let column_name = &self.results[pos].columns[index].name;
+        if column_name.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(column_name.clone()))
+        }
     }
 
     fn convert_buffer<T>(&mut self, col: impl TryInto<usize>, mut sink: impl FnMut(&mut Connection, &Vec<u8>, &CS_DATAFMT) -> Result<T>) -> Result<Option<T>> {
@@ -620,6 +637,10 @@ impl Connection {
             return Err(Error::from_message("Invalid connection state"));
         }
         let parsed_query = Self::parse_query(text.as_ref());
+        if parsed_query.param_count != params.len() {
+            return Err(Error::from_message("Invalid parameter count"))
+        }
+
         let text = Self::generate_query(&parsed_query, params);
 
         let mut command = Command::new(self.clone());
@@ -735,7 +756,7 @@ impl Connection {
 
     fn parse_query(text: impl AsRef<str>) -> ParsedQuery {
         let mut pieces: Vec<TextPiece> = Vec::new();
-        let mut param_count: i32 = 0;
+        let mut param_count: usize = 0;
         let mut cur = String::new();
         let mut it = text.as_ref().chars().peekable();
         loop {
@@ -796,11 +817,7 @@ impl Connection {
             pieces.push(TextPiece::Literal(cur.clone()));
         }
         
-        ParsedQuery {
-            text: text.as_ref().to_string(),
-            pieces,
-            param_count
-        }
+        ParsedQuery { pieces, param_count }
     }
 
     fn generate_query(query: &ParsedQuery, params: &[&dyn ToSql]) -> String {
@@ -1114,7 +1131,6 @@ mod tests {
     fn test_parse_query() {
         let s = "?, '?', ?, \"?\", ? /* que? */, ? -- ?no?";
         let query = Connection::parse_query(s);
-        assert_eq!(query.text, s);
         assert_eq!(query.pieces.len(), 8);
         assert_eq!(query.param_count, 4);
 
