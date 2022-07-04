@@ -1,9 +1,10 @@
 use std::ffi::CStr;
-use std::{ptr, mem, ffi::CString, rc::Rc};
+use std::sync::{Arc, Mutex};
+use std::{ptr, mem, ffi::CString};
 use chrono::{NaiveDate, NaiveTime, NaiveDateTime};
 use freetds_sys::*;
 use crate::command::CommandArg;
-use crate::{context::Context, property::Property, Result, error::err, error::Error, command::Command};
+use crate::{property::Property, Result, error::err, error::Error, command::Command};
 use crate::to_sql::ToSql;
 
 #[derive(PartialEq, Debug)]
@@ -49,20 +50,15 @@ impl Rows {
     }
 }
 
-#[derive(Debug)]
 pub struct ResultSet {
-    ctx: Context,
+    conn: Connection,
     results: Vec<Rows>,
     pos: Option<usize>
 }
 
 impl ResultSet {
-    fn new(ctx: &Context, results: Vec<Rows>) -> Self {
-        Self {
-            ctx: ctx.clone(),
-            results,
-            pos: Default::default()
-        }
+    fn new(conn: Connection, results: Vec<Rows>) -> Self {
+        Self { conn, results, pos: Default::default() }
     }
 
     pub fn next_resultset(&mut self) -> bool {
@@ -119,7 +115,7 @@ impl ResultSet {
         Ok(self.results[pos].columns.len())
     }
 
-    fn convert_buffer<T>(&mut self, col: impl TryInto<usize>, mut sink: impl FnMut(&mut Context, &Vec<u8>, &CS_DATAFMT) -> Result<T>) -> Result<Option<T>> {
+    fn convert_buffer<T>(&mut self, col: impl TryInto<usize>, mut sink: impl FnMut(&mut Connection, &Vec<u8>, &CS_DATAFMT) -> Result<T>) -> Result<Option<T>> {
         if self.pos.is_none() {
             return err!("Invalid state");
         }
@@ -154,14 +150,14 @@ impl ResultSet {
                 Ok(None)
             },
             Some(buffer) => {
-                let result = sink(&mut self.ctx, buffer, &column.fmt)?;
+                let result = sink(&mut self.conn, buffer, &column.fmt)?;
                 Ok(Some(result))
             }
         }
     }
 
     pub fn get_i64(&mut self, col: impl TryInto<usize>) -> Result<Option<i64>> {
-        self.convert_buffer(col, |ctx, buffer, fmt| {
+        self.convert_buffer(col, |conn, buffer, fmt| {
             match fmt.datatype {
                 CS_LONG_TYPE => {
                     unsafe {
@@ -178,7 +174,7 @@ impl ResultSet {
                     dstfmt.count = 1;
     
                     let mut dstdata: Vec<u8> = vec![0u8; dstfmt.maxlength as usize];
-                    let dstlen = ctx.convert(
+                    let dstlen = conn.convert(
                         &fmt, &buffer,
                         &dstfmt,
                         &mut dstdata)?;
@@ -194,7 +190,7 @@ impl ResultSet {
     }
 
     pub fn get_i32(&mut self, col: impl TryInto<usize>) -> Result<Option<i32>> {
-        self.convert_buffer(col, |ctx, buffer, fmt| {
+        self.convert_buffer(col, |conn, buffer, fmt| {
             match fmt.datatype {
                 CS_INT_TYPE => {
                     unsafe {
@@ -211,7 +207,7 @@ impl ResultSet {
                     dstfmt.count = 1;
     
                     let mut dstdata: Vec<u8> = vec![0u8; dstfmt.maxlength as usize];
-                    let dstlen = ctx.convert(
+                    let dstlen = conn.convert(
                         &fmt, &buffer,
                         &dstfmt,
                         &mut dstdata)?;
@@ -227,7 +223,7 @@ impl ResultSet {
     }
 
     pub fn get_f64(&mut self, col: impl TryInto<usize>) -> Result<Option<f64>> {
-        self.convert_buffer(col, |ctx, buffer, fmt| {
+        self.convert_buffer(col, |conn, buffer, fmt| {
             match fmt.datatype {
                 CS_FLOAT_TYPE => {
                     unsafe {
@@ -244,7 +240,7 @@ impl ResultSet {
                     dstfmt.count = 1;
     
                     let mut dstdata: Vec<u8> = vec![0u8; dstfmt.maxlength as usize];
-                    let dstlen = ctx.convert(
+                    let dstlen = conn.convert(
                         &fmt, &buffer,
                         &dstfmt,
                         &mut dstdata)?;
@@ -260,7 +256,7 @@ impl ResultSet {
     }
 
     pub fn get_string(&mut self, col: impl TryInto<usize>) -> Result<Option<String>> {
-        self.convert_buffer(col, |ctx, buffer, fmt| {
+        self.convert_buffer(col, |conn, buffer, fmt| {
             match fmt.datatype {
                 CS_CHAR_TYPE | CS_LONGCHAR_TYPE | CS_VARCHAR_TYPE | CS_UNICHAR_TYPE | CS_TEXT_TYPE | CS_UNITEXT_TYPE => {
                     let value = String::from_utf8_lossy(buffer);
@@ -281,7 +277,7 @@ impl ResultSet {
                     dstfmt.count = 1;
     
                     let mut dstdata: Vec<u8> = vec![0u8; dstfmt.maxlength as usize];
-                    let dstlen = ctx.convert(
+                    let dstlen = conn.convert(
                         &fmt, &buffer,
                         &dstfmt,
                         &mut dstdata)?;
@@ -292,34 +288,34 @@ impl ResultSet {
     }
 
     fn get_daterec(&mut self, col: impl TryInto<usize>) -> Result<Option<CS_DATEREC>> {
-        self.convert_buffer(col, |ctx, buffer, fmt| {
+        self.convert_buffer(col, |conn, buffer, fmt| {
             match fmt.datatype {
                 CS_DATE_TYPE => {
                     unsafe {
                         assert!(buffer.len() == mem::size_of::<CS_DATE>());
                         let buf: *const CS_DATE = mem::transmute(buffer.as_ptr());
-                        Ok(ctx.crack_date(*buf)?)
+                        Ok(conn.crack_date(*buf)?)
                     }
                 },
                 CS_TIME_TYPE => {
                     unsafe {
                         assert!(buffer.len() == mem::size_of::<CS_TIME>());
                         let buf: *const CS_TIME = mem::transmute(buffer.as_ptr());
-                        Ok(ctx.crack_time(*buf)?)
+                        Ok(conn.crack_time(*buf)?)
                     }
                 },
                 CS_DATETIME_TYPE => {
                     unsafe {
                         assert!(buffer.len() == mem::size_of::<CS_DATETIME>());
                         let buf: *const CS_DATETIME = mem::transmute(buffer.as_ptr());
-                        Ok(ctx.crack_datetime(*buf)?)
+                        Ok(conn.crack_datetime(*buf)?)
                     }
                 },
                 CS_DATETIME4_TYPE => {
                     unsafe {
                         assert!(buffer.len() == mem::size_of::<CS_DATETIME4>());
                         let buf: *const CS_DATETIME4 = mem::transmute(buffer.as_ptr());
-                        Ok(ctx.crack_smalldatetime(*buf)?)
+                        Ok(conn.crack_smalldatetime(*buf)?)
                     }
                 },
                 _ => {
@@ -331,7 +327,7 @@ impl ResultSet {
 
                     let mut dstdata: Vec<u8> = Vec::new();
                     dstdata.resize(dstfmt.maxlength as usize, Default::default());
-                    let dstlen = ctx.convert(
+                    let dstlen = conn.convert(
                         &fmt, &buffer,
                         &dstfmt,
                         &mut dstdata)?;
@@ -339,7 +335,7 @@ impl ResultSet {
                     assert!(dstlen == mem::size_of::<CS_DATETIME>());
                     unsafe {
                         let buf: *const CS_DATETIME = mem::transmute(dstdata.as_ptr());
-                        Ok(ctx.crack_datetime(*buf)?)
+                        Ok(conn.crack_datetime(*buf)?)
                     }
                 }
             }
@@ -388,7 +384,7 @@ impl ResultSet {
     }
 
     pub fn get_blob(&mut self, col: impl TryInto<usize>) -> Result<Option<Vec<u8>>> {
-        self.convert_buffer(col, |ctx, buffer, fmt| {
+        self.convert_buffer(col, |conn, buffer, fmt| {
             match fmt.datatype {
                 CS_BINARY_TYPE | CS_LONGBINARY_TYPE | CS_IMAGE_TYPE => {
                     Ok(buffer.clone())
@@ -411,7 +407,7 @@ impl ResultSet {
 
                     let mut dstdata: Vec<u8> = Vec::new();
                     dstdata.resize(dstfmt.maxlength as usize, Default::default());
-                    let dstlen = ctx.convert(&fmt, &buffer, &dstfmt, &mut dstdata)?;
+                    let dstlen = conn.convert(&fmt, &buffer, &dstfmt, &mut dstdata)?;
                     dstdata.resize(dstlen, Default::default());
                     Ok(dstdata)
                 }
@@ -422,33 +418,51 @@ impl ResultSet {
 }
 
 pub struct CSConnection {
-    pub handle: *mut CS_CONNECTION,
+    pub ctx_handle: *mut CS_CONTEXT,
+    pub conn_handle: *mut CS_CONNECTION,
 }
 
 impl CSConnection {
-    pub fn new(ctx: *mut CS_CONTEXT) -> Self {
+    pub fn new() -> Self {
         unsafe {
-            let mut conn: *mut CS_CONNECTION = ptr::null_mut();
-            let ret = ct_con_alloc(ctx, &mut conn);
+            let mut ctx_handle: *mut CS_CONTEXT = ptr::null_mut();
+            let ret = cs_ctx_alloc(CS_VERSION_125, &mut ctx_handle);
+            if ret != CS_SUCCEED {
+                panic!("cs_ctx_alloc failed");
+            }
+
+            let ret = ct_init(ctx_handle, CS_VERSION_125);
+            if ret != CS_SUCCEED {
+                panic!("ct_init failed");
+            }
+
+            let mut conn_handle: *mut CS_CONNECTION = ptr::null_mut();
+            let ret = ct_con_alloc(ctx_handle, &mut conn_handle);
             if ret != CS_SUCCEED {
                 panic!("ct_con_alloc failed");
             }
 
-            Self {
-                handle: conn
-            }
+            Self { ctx_handle, conn_handle }
         }
-    }
-
-    
+    }   
 }
 
 impl Drop for CSConnection {
     fn drop(&mut self) {
         unsafe {
-            let ret = ct_con_drop(self.handle);
+            let ret = ct_con_drop(self.conn_handle);
             if ret != CS_SUCCEED {
                 panic!("ct_con_drop failed");
+            }
+
+            let ret = ct_exit(self.ctx_handle, CS_UNUSED);
+            if ret != CS_SUCCEED {
+                ct_exit(self.ctx_handle, CS_FORCE_EXIT);
+            }
+
+            let ret = cs_ctx_drop(self.ctx_handle);
+            if ret != CS_SUCCEED {
+                panic!("cs_ctx_drop failed");
             }
         }
     }
@@ -456,19 +470,17 @@ impl Drop for CSConnection {
 
 #[derive(Clone)]
 pub struct Connection {
-    pub ctx: Context,
-    pub conn: Rc<CSConnection>
+    pub conn: Arc<Mutex<CSConnection>>,
+    connected: bool
 }
 
 impl Connection {
-    pub fn new(ctx: &Context) -> Self {
-        let ctx = ctx.clone();
-        let conn = Rc::new(CSConnection::new(ctx.ctx.handle));
-        Self::diag_init(conn.handle);
-        Self {
-            ctx,
-            conn,
-        }
+    pub fn new() -> Self {
+        let conn = Arc::new(Mutex::new(CSConnection::new()));
+        let conn_guard = conn.lock().unwrap();
+        Self::diag_init(conn_guard.ctx_handle, conn_guard.conn_handle);
+        drop(conn_guard);
+        Self { conn, connected: false }
     }
 
     pub fn set_client_charset(&mut self, charset: impl AsRef<str>) -> Result<()> {
@@ -542,7 +554,7 @@ impl Connection {
             match value {
                 Property::I32(mut i) => {
                     ret = ct_con_props(
-                        self.conn.handle,
+                        self.conn.lock().unwrap().conn_handle,
                         CS_SET,
                         property as CS_INT,
                         std::mem::transmute(&mut i),
@@ -551,7 +563,7 @@ impl Connection {
                 },
                 Property::U32(mut i) => {
                     ret = ct_con_props(
-                        self.conn.handle,
+                        self.conn.lock().unwrap().conn_handle,
                         CS_SET,
                         property as CS_INT,
                         std::mem::transmute(&mut i),
@@ -561,7 +573,7 @@ impl Connection {
                 Property::String(s) => {
                     let s1 = CString::new(s)?;
                     ret = ct_con_props(
-                        self.conn.handle,
+                        self.conn.lock().unwrap().conn_handle,
                         CS_SET,
                         property as CS_INT,
                         std::mem::transmute(s1.as_ptr()),
@@ -582,26 +594,35 @@ impl Connection {
     }
 
     pub fn connect(&mut self, server_name: impl AsRef<str>) -> Result<()> {
+        if self.connected {
+            return Err(Error::from_message("Invalid connection state"));
+        }
+
+        self.diag_clear();
+        let server_name = CString::new(server_name.as_ref())?;
+        let ret;
         unsafe {
-            self.diag_clear();
-            let server_name = CString::new(server_name.as_ref())?;
-            let ret = ct_connect(
-                self.conn.handle,
+            ret = ct_connect(
+                self.conn.lock().unwrap().conn_handle,
                 mem::transmute(server_name.as_ptr()),
                 CS_NULLTERM);
-            if ret == CS_SUCCEED {
-                Ok(())
-            } else {
-                Err(self.get_error().unwrap_or(Error::from_message("ct_connect failed")))
-            }
+        }
+        if ret == CS_SUCCEED {
+            self.connected = true;
+            Ok(())
+        } else {
+            Err(self.get_error().unwrap_or(Error::from_message("ct_connect failed")))
         }
     }
 
     pub fn execute(&mut self, text: impl AsRef<str>, params: &[&dyn ToSql]) -> Result<ResultSet> {
+        if !self.connected {
+            return Err(Error::from_message("Invalid connection state"));
+        }
         let parsed_query = Self::parse_query(text.as_ref());
         let text = Self::generate_query(&parsed_query, params);
 
-        let mut command = Command::new(&self);
+        let mut command = Command::new(self.clone());
         command.command(CS_LANG_CMD, CommandArg::String(&text), CS_UNUSED)?;
         command.send()?;
 
@@ -645,7 +666,7 @@ impl Connection {
             }
         }
 
-        Ok(ResultSet::new(&self.ctx, results))
+        Ok(ResultSet::new(self.clone(), results))
     }
 
     fn fetch_result(cmd: &mut Command) -> Result<Rows> {
@@ -777,8 +798,8 @@ impl Connection {
         
         ParsedQuery {
             text: text.as_ref().to_string(),
-            pieces: pieces,
-            param_count: param_count
+            pieces,
+            param_count
         }
     }
 
@@ -805,8 +826,11 @@ impl Connection {
         return result;
     }
 
-    fn diag_init(conn: *mut CS_CONNECTION) {
+    fn diag_init(ctx: *mut CS_CONTEXT, conn: *mut CS_CONNECTION) {
         unsafe {
+            let ret = cs_diag(ctx, CS_INIT, CS_UNUSED, CS_UNUSED, ptr::null_mut());
+            assert_eq!(CS_SUCCEED, ret);
+
             let ret = ct_diag(conn, CS_INIT, CS_UNUSED, CS_UNUSED, ptr::null_mut());
             assert_eq!(CS_SUCCEED, ret);
         }
@@ -814,22 +838,52 @@ impl Connection {
 
     pub fn diag_clear(&mut self) {
         unsafe {
-            let ret = ct_diag(self.conn.handle, CS_CLEAR, CS_ALLMSG_TYPE, CS_UNUSED, ptr::null_mut());
+            let ret = cs_diag(
+                self.conn.lock().unwrap().ctx_handle,
+                CS_CLEAR,
+                CS_CLIENTMSG_TYPE,
+                CS_UNUSED,
+                ptr::null_mut());
+            assert_eq!(CS_SUCCEED, ret);
+
+            let ret = ct_diag(
+                self.conn.lock().unwrap().conn_handle,
+                CS_CLEAR,
+                CS_ALLMSG_TYPE,
+                CS_UNUSED,
+                ptr::null_mut());
             assert_eq!(CS_SUCCEED, ret);
         }
     }
 
     fn diag_get(&mut self) -> Vec<(i32,String)> {
         let mut result = Vec::new();
+        let conn = self.conn.lock().unwrap();
         unsafe {
+            /* CS messages */
+            let count: i32 = Default::default();
+            let ret = cs_diag(conn.ctx_handle, CS_STATUS, CS_UNUSED, CS_UNUSED, mem::transmute(&count));
+            assert_eq!(CS_SUCCEED, ret);
+            
+            for i in 0..count {
+                let mut buffer: CS_CLIENTMSG = Default::default();
+                let ret = cs_diag(conn.ctx_handle, CS_GET, CS_CLIENTMSG_TYPE, i, mem::transmute(&mut buffer));
+                assert_eq!(CS_SUCCEED, ret);
+
+                result.push((
+                    buffer.msgnumber,
+                    CStr::from_ptr(buffer.msgstring.as_ptr()).to_string_lossy().trim_end().to_string()
+                ));
+            }
+
             /* Client messages */
             let count: i32 = Default::default();
-            let ret = ct_diag(self.conn.handle, CS_STATUS, CS_CLIENTMSG_TYPE, CS_UNUSED, mem::transmute(&count));
+            let ret = ct_diag(conn.conn_handle, CS_STATUS, CS_CLIENTMSG_TYPE, CS_UNUSED, mem::transmute(&count));
             assert_eq!(CS_SUCCEED, ret);
 
             for i in 0..count {
                 let buffer: CS_CLIENTMSG = Default::default();
-                let ret = ct_diag(self.conn.handle, CS_GET, CS_CLIENTMSG_TYPE, i + 1, mem::transmute(&buffer));
+                let ret = ct_diag(conn.conn_handle, CS_GET, CS_CLIENTMSG_TYPE, i + 1, mem::transmute(&buffer));
                 assert_eq!(CS_SUCCEED, ret);
 
                 let msgnumber = buffer.msgnumber as i32;
@@ -838,12 +892,12 @@ impl Connection {
             }
 
             /* server messages */
-            let ret = ct_diag(self.conn.handle, CS_STATUS, CS_SERVERMSG_TYPE, CS_UNUSED, mem::transmute(&count));
+            let ret = ct_diag(conn.conn_handle, CS_STATUS, CS_SERVERMSG_TYPE, CS_UNUSED, mem::transmute(&count));
             assert_eq!(CS_SUCCEED, ret);
 
             for i in 0..count {
                 let buffer: CS_SERVERMSG = Default::default();
-                let ret = ct_diag(self.conn.handle, CS_GET, CS_SERVERMSG_TYPE, i + 1, mem::transmute(&buffer));
+                let ret = ct_diag(conn.conn_handle, CS_GET, CS_SERVERMSG_TYPE, i + 1, mem::transmute(&buffer));
                 assert_eq!(CS_SUCCEED, ret);
 
                 let msgnumber = buffer.msgnumber as i32;
@@ -862,19 +916,104 @@ impl Connection {
             Some(Error::from_message(&errors.last().unwrap().1))
         }
     }
+
+    pub fn is_connected(&mut self) -> bool {
+        if !self.connected {
+            return false;
+        }
+
+        let ret;
+        let status: i32 = Default::default();
+        self.diag_clear();
+        unsafe {
+            ret = ct_con_props(
+                self.conn.lock().unwrap().conn_handle,
+                CS_GET,
+                CS_CON_STATUS as i32,
+                mem::transmute(&status),
+                CS_UNUSED,
+                ptr::null_mut());
+        }
+
+        if ret != CS_SUCCEED {
+            false
+        } else {
+            status == CS_CONSTAT_CONNECTED
+        }
+    }
+
+    fn convert(&mut self, srcfmt: &CS_DATAFMT, srcdata: &[u8], dstfmt: &CS_DATAFMT, dstdata: &mut [u8]) -> Result<usize> {
+        self.diag_clear();
+        let mut dstlen: i32 = Default::default();
+        let ret;
+        unsafe {
+            ret = cs_convert(
+                self.conn.lock().unwrap().ctx_handle,
+                mem::transmute(srcfmt as *const CS_DATAFMT),
+                mem::transmute(srcdata.as_ptr()),
+                mem::transmute(dstfmt as *const CS_DATAFMT),
+                mem::transmute(dstdata.as_mut_ptr()),
+                &mut dstlen);
+        }
+        if ret != CS_SUCCEED {
+            Err(self.get_error().unwrap_or(Error::from_message("cs_convert failed")))
+        } else {
+            Ok(dstlen as usize)
+        }
+    }
+
+    unsafe fn dt_crack_unsafe<T>(&mut self, type_: i32, dateval: *const T) -> Result<CS_DATEREC> {
+        let mut daterec: CS_DATEREC = Default::default();
+        let ret;
+        {
+            ret = cs_dt_crack(self.conn.lock().unwrap().ctx_handle, type_, mem::transmute(dateval), &mut daterec);
+        }
+        if ret != CS_SUCCEED {
+            return Err(self.get_error().unwrap_or(Error::from_message("cs_dt_crack failed")));
+        }
+        Ok(daterec)
+    }
+
+    pub fn crack_date(&mut self, val: CS_DATE) -> Result<CS_DATEREC> {
+        unsafe {
+            self.dt_crack_unsafe(CS_DATE_TYPE, &val)
+        }
+    }
+
+    pub fn crack_time(&mut self, val: CS_TIME) -> Result<CS_DATEREC> {
+        unsafe {
+            self.dt_crack_unsafe(CS_TIME_TYPE, &val)
+        }
+    }
+
+    pub fn crack_datetime(&mut self, val: CS_DATETIME) -> Result<CS_DATEREC> {
+        unsafe {
+            self.dt_crack_unsafe(CS_DATETIME_TYPE, &val)
+        }
+    }
+
+    pub fn crack_smalldatetime(&mut self, val: CS_DATETIME4) -> Result<CS_DATEREC> {
+        unsafe {
+            self.dt_crack_unsafe(CS_DATETIME4_TYPE, &val)
+        }
+    }
+
 }
+
+unsafe impl Send for Connection {}
 
 #[cfg(test)]
 mod tests {
+    use std::thread;
+    use std::time::Duration;
+
     use chrono::NaiveDate;
     use crate::connection::TextPiece;
     use crate::to_sql::ToSql;
-    use crate::context::Context;
     use super::Connection;
 
-    fn connect() -> (Context, Connection) {
-        let ctx = Context::new();
-        let mut conn = Connection::new(&ctx);
+    fn connect() -> Connection {
+        let mut conn = Connection::new();
         conn.set_client_charset("UTF-8").unwrap();
         conn.set_username("sa").unwrap();
         conn.set_password("").unwrap();
@@ -883,14 +1022,12 @@ mod tests {
         conn.set_login_timeout(5).unwrap();
         conn.set_timeout(5).unwrap();
         conn.connect("***REMOVED***:2025").unwrap();
-
-        (ctx, conn)
+        conn
     }
 
     #[test]
     fn test_select() {
-        let (_, mut conn) = connect();
-
+        let mut conn = connect();
         let text = 
             "select \
                 'aaaa', \
@@ -917,7 +1054,7 @@ mod tests {
 
     #[test]
     fn test_params() {
-        let (_, mut conn) = connect();
+        let mut conn = connect();
         let text = "\
             create table #test(\
                 col1 varchar(10), \
@@ -960,7 +1097,7 @@ mod tests {
 
     #[test]
     fn test_multiple_rows() {
-        let (_, mut conn) = connect();
+        let mut conn = connect();
 
         let text = "select 1 union select 2 union select 3";
         let mut rs = conn.execute(text, &[]).unwrap();
@@ -996,7 +1133,7 @@ mod tests {
 
     #[test]
     fn test_quotes() {
-        let (_, mut conn) = connect();
+        let mut conn = connect();
         let mut rs = conn
             .execute("select '''ab''', ?", &[&"\'cd\'"])
             .unwrap();
@@ -1027,8 +1164,7 @@ mod tests {
 
     #[test]
     fn test_utf8() {
-        let (_, mut conn) = connect();
-
+        let mut conn = connect();
         conn
             .execute("if not exists(select id from sysobjects where type='U' and name='freetds_rs_test') execute('create table freetds_rs_test(c varchar(10))')", &[])
             .unwrap();
@@ -1049,6 +1185,30 @@ mod tests {
         conn
             .execute("drop table freetds_rs_test", &[])
             .unwrap();
+    }
+
+    #[test]
+    fn test_multiple_threads() {
+        let mut conn = connect();
+        let t0 = thread::spawn(move ||{
+            thread::sleep(Duration::from_millis(500));
+            let mut rs = conn.execute("select getdate()", &[]).unwrap();
+            while rs.next() {
+                println!("[0] {}", rs.get_string(0).unwrap().unwrap());
+            }
+        });
+
+        let mut conn = connect();
+        let t1 = thread::spawn(move ||{
+            thread::sleep(Duration::from_millis(500));
+            let mut rs = conn.execute("select getdate()", &[]).unwrap();
+            while rs.next() {
+                println!("[1] {}", rs.get_string(0).unwrap().unwrap());
+            }
+        });
+
+        t0.join().unwrap();
+        t1.join().unwrap();
     }
 
 }
