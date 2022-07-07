@@ -441,6 +441,14 @@ impl ResultSet {
     pub fn messages(&self) -> &Vec<String> {
         &self.messages
     }
+
+    pub fn error(&self) -> Option<Error> {
+        if self.messages.is_empty() {
+            None
+        } else {
+            Some(Error::from_message(self.messages.first().unwrap()))
+        }
+    }
 }
 
 pub struct CSConnection {
@@ -718,8 +726,7 @@ impl Connection {
             }
         }
 
-        let messages: Vec<String> = self
-            .diag_get()
+        let messages: Vec<String> = errors
             .iter()
             .map(|d| String::from(&d.1) )
             .collect();
@@ -1284,10 +1291,19 @@ mod tests {
     #[test]
     fn test_status_result() {
         let mut conn = connect();
+
+        let res = conn.execute("sp_locklogin test123, 'lock'", &[]);
+        assert!(res.is_ok());
+        let res = res.unwrap();
+        assert!(res.status().is_some());
+        assert_eq!(0, res.status().unwrap());
+
         let res = conn.execute("sp_locklogin all_your_base_are_belong_to_us, 'lock'", &[]);
         assert!(res.is_ok());
-        assert!(res.as_ref().unwrap().status().is_some());
-        assert_eq!(1, res.as_ref().unwrap().status().unwrap());
+        let res = res.unwrap();
+        assert!(res.status().is_some());
+        assert_eq!(1, res.status().unwrap());
+        assert_eq!("No such account -- nothing changed.", res.error().unwrap().desc());
     }
 
 }
