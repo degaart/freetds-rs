@@ -52,12 +52,14 @@ impl Rows {
 pub struct ResultSet {
     conn: Connection,
     results: Vec<Rows>,
-    pos: Option<usize>
+    pos: Option<usize>,
+    status: Option<i32>,
+    messages: Vec<String>
 }
 
 impl ResultSet {
-    fn new(conn: Connection, results: Vec<Rows>) -> Self {
-        Self { conn, results, pos: Default::default() }
+    fn new(conn: Connection, results: Vec<Rows>, status: Option<i32>, messages: Vec<String>) -> Self {
+        Self { conn, results, pos: Default::default(), status, messages }
     }
 
     pub fn next_resultset(&mut self) -> bool {
@@ -432,6 +434,13 @@ impl ResultSet {
         })
     }
 
+    pub fn status(&self) -> Option<i32> {
+        self.status
+    }
+
+    pub fn messages(&self) -> &Vec<String> {
+        &self.messages
+    }
 }
 
 pub struct CSConnection {
@@ -648,13 +657,20 @@ impl Connection {
         command.send()?;
 
         let mut results: Vec<Rows> = Vec::new();
+        let mut status_result: Option<i32> = None;
+        let mut failed = false;
+        let mut errors: Vec<(i32,String)> = Vec::new();
         loop {
             let (ret, res_type) = command.results()?;
-            if let Some(error) = self.get_error() {
-                command.cancel(CS_CANCEL_ALL)?;
-                return Err(error);
-            } else if !ret {
+            if !ret {
                 break;
+            }
+
+            /*
+                Collect diag messages because command.results() clears them
+            */
+            for err in self.diag_get() {
+                errors.push(err);
             }
 
             match res_type {
@@ -670,16 +686,23 @@ impl Connection {
                         let buf: *const i32 = mem::transmute(row.as_ptr());
                         status = *buf;
                     }
-                    if status != 0 {
-                        command.cancel(CS_CANCEL_ALL).unwrap();
-                        return err!("Query returned an error status: {}", status);
-                    }
+
+                    match status_result {
+                        None => {
+                            status_result = Some(status)
+                        },
+                        Some(s) => {
+                            if s == 0 {
+                                status_result = Some(status);
+                            }
+                        }
+                    };
                 },
                 CS_COMPUTE_RESULT | CS_CURSOR_RESULT | CS_PARAM_RESULT => {
                     command.cancel(CS_CANCEL_CURRENT)?;
                 },
                 CS_CMD_FAIL => {
-                    return err!("Query execution resulted in error");
+                    failed = true;
                 },
                 _ => {
                     /* Do nothing, most notably, ignore CS_CMD_SUCCEED and CS_CMD_DONE */
@@ -687,7 +710,20 @@ impl Connection {
             }
         }
 
-        Ok(ResultSet::new(self.clone(), results))
+        if failed {
+            if errors.is_empty() {
+                return err!("Query execution resulted in error");
+            } else {
+                return Err(Error::from_message(&errors.last().unwrap().1));
+            }
+        }
+
+        let messages: Vec<String> = self
+            .diag_get()
+            .iter()
+            .map(|d| String::from(&d.1) )
+            .collect();
+        Ok(ResultSet::new(self.clone(), results, status_result, messages))
     }
 
     fn fetch_result(cmd: &mut Command) -> Result<Rows> {
@@ -1034,7 +1070,7 @@ mod tests {
         conn.set_client_charset("UTF-8").unwrap();
         conn.set_username("sa").unwrap();
         conn.set_password("").unwrap();
-        conn.set_database("***REMOVED***").unwrap();
+        conn.set_database("master").unwrap();
         conn.set_tds_version_50().unwrap();
         conn.set_login_timeout(5).unwrap();
         conn.set_timeout(5).unwrap();
@@ -1067,6 +1103,24 @@ mod tests {
         assert_eq!(rs.get_string(7).unwrap().unwrap(), "ccc".to_string());
         assert!(rs.get_string(8).unwrap().is_none());
         assert!(!rs.next());
+    }
+
+    #[test]
+    fn test_execution_failure() {
+        let mut conn = connect();
+        let text = 
+            "selecta \
+                'aaaa', \
+                2, 5000000000, \
+                3.14, \
+                cast('1986/07/05 10:30:31.1' as datetime), \
+                cast(3.14 as numeric(18,2)), \
+                cast(0xDEADBEEF as image), \
+                cast('ccc' as text), \
+                null";
+        let ret = conn.execute(text, &[]);
+        assert!(ret.is_err());
+        assert_eq!("Incorrect syntax near '('.", ret.err().unwrap().desc());
     }
 
     #[test]
@@ -1225,6 +1279,15 @@ mod tests {
 
         t0.join().unwrap();
         t1.join().unwrap();
+    }
+
+    #[test]
+    fn test_status_result() {
+        let mut conn = connect();
+        let res = conn.execute("sp_locklogin all_your_base_are_belong_to_us, 'lock'", &[]);
+        assert!(res.is_ok());
+        assert!(res.as_ref().unwrap().status().is_some());
+        assert_eq!(1, res.as_ref().unwrap().status().unwrap());
     }
 
 }
