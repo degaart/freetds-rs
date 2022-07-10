@@ -4,7 +4,8 @@ use std::{ptr, mem, ffi::CString};
 use chrono::{NaiveDate, NaiveTime, NaiveDateTime};
 use freetds_sys::*;
 use crate::command::CommandArg;
-use crate::{property::Property, Result, error::err, error::Error, command::Command};
+use crate::error;
+use crate::{property::Property, Result, error::Error, command::Command};
 use crate::to_sql::ToSql;
 
 #[derive(PartialEq, Debug)]
@@ -54,11 +55,11 @@ pub struct ResultSet {
     results: Vec<Rows>,
     pos: Option<usize>,
     status: Option<i32>,
-    messages: Vec<String>
+    messages: Vec<Error>
 }
 
 impl ResultSet {
-    fn new(conn: Connection, results: Vec<Rows>, status: Option<i32>, messages: Vec<String>) -> Self {
+    fn new(conn: Connection, results: Vec<Rows>, status: Option<i32>, messages: Vec<Error>) -> Self {
         Self { conn, results, pos: Default::default(), status, messages }
     }
 
@@ -110,7 +111,7 @@ impl ResultSet {
     pub fn column_count(&self) -> Result<usize> {
         let pos = self.pos.unwrap_or(0);
         if pos >= self.results.len() {
-            return err!("Invalid statement state");
+            return Err(Error::from_message("Invalid statement state"));
         }
 
         Ok(self.results[pos].columns.len())
@@ -119,7 +120,7 @@ impl ResultSet {
     pub fn column_name(&self, index: usize) -> Result<Option<String>> {
         let pos = self.pos.unwrap_or(0);
         if pos >= self.results.len() {
-            return err!("Invalid statement state");
+            return Err(Error::from_message("Invalid statement state"));
         }
 
         if index >= self.results[pos].columns.len() {
@@ -136,22 +137,22 @@ impl ResultSet {
 
     fn convert_buffer<T>(&mut self, col: impl TryInto<usize>, mut sink: impl FnMut(&mut Connection, &Vec<u8>, &CS_DATAFMT) -> Result<T>) -> Result<Option<T>> {
         if self.pos.is_none() {
-            return err!("Invalid state");
+            return Err(Error::from_message("Invalid state"));
         }
         
         let pos = self.pos.unwrap();
         if pos >= self.results.len() {
-            return err!("Invalid state");
+            return Err(Error::from_message("Invalid state"));
         }
         
         let results = &self.results[pos];
         if results.pos.is_none() {
-            return err!("Invalid state");
+            return Err(Error::from_message("Invalid state"));
         }
 
         let pos = results.pos.unwrap();
         if pos >= results.rows.len() {
-            return err!("Invalid state");
+            return Err(Error::from_message("Invalid state"));
         }
 
         let row = &results.rows[pos];
@@ -159,7 +160,7 @@ impl ResultSet {
             .try_into()
             .map_err(|_| Error::from_message("Invalid column index"))?;
         if col >= results.columns.len() {
-            return err!("Invalid column index");
+            return Err(Error::from_message("Invalid column index"));
         }
 
         let column = &results.columns[col];
@@ -438,17 +439,17 @@ impl ResultSet {
         self.status
     }
 
-    pub fn messages(&self) -> &Vec<String> {
+    pub fn messages(&self) -> &Vec<Error> {
         &self.messages
     }
 
     pub fn error(&self) -> Option<Error> {
-        if self.messages.is_empty() {
-            None
-        } else {
-            Some(Error::from_message(self.messages.first().unwrap()))
+        match self.messages.first() {
+            None => None,
+            Some(error) => Some(error.clone())
         }
     }
+
 }
 
 pub struct CSConnection {
@@ -615,7 +616,7 @@ impl Connection {
                         ptr::null_mut());
                 },
                 _ => {
-                    return err!("Invalid argument");
+                    return Err(Error::from_message("Invalid argument"));
                 }
             }
 
@@ -667,7 +668,7 @@ impl Connection {
         let mut results: Vec<Rows> = Vec::new();
         let mut status_result: Option<i32> = None;
         let mut failed = false;
-        let mut errors: Vec<(i32,String)> = Vec::new();
+        let mut errors: Vec<Error> = Vec::new();
         loop {
             let (ret, res_type) = command.results()?;
             if !ret {
@@ -677,9 +678,7 @@ impl Connection {
             /*
                 Collect diag messages because command.results() clears them
             */
-            for err in self.diag_get() {
-                errors.push(err);
-            }
+            errors.extend(self.diag_get().iter().map(|e| e.clone()));
 
             match res_type {
                 CS_ROW_RESULT => {
@@ -720,17 +719,13 @@ impl Connection {
 
         if failed {
             if errors.is_empty() {
-                return err!("Query execution resulted in error");
+                return Err(Error::from_message("Query execution resulted in error"));
             } else {
-                return Err(Error::from_message(&errors.last().unwrap().1));
+                return Err(errors.last().unwrap().clone());
             }
         }
 
-        let messages: Vec<String> = errors
-            .iter()
-            .map(|d| String::from(&d.1) )
-            .collect();
-        Ok(ResultSet::new(self.clone(), results, status_result, messages))
+        Ok(ResultSet::new(self.clone(), results, status_result, errors))
     }
 
     fn fetch_result(cmd: &mut Command) -> Result<Rows> {
@@ -788,7 +783,7 @@ impl Connection {
                         row.buffers.push(Some(buffer));
                     },
                     _ => {
-                        return err!("Data truncation occured");
+                        return Err(Error::from_message("Data truncation occured"));
                     }
                 }
             }
@@ -916,7 +911,7 @@ impl Connection {
         }
     }
 
-    fn diag_get(&mut self) -> Vec<(i32,String)> {
+    fn diag_get(&mut self) -> Vec<Error> {
         let mut result = Vec::new();
         let conn = self.conn.lock().unwrap();
         unsafe {
@@ -930,10 +925,10 @@ impl Connection {
                 let ret = cs_diag(conn.ctx_handle, CS_GET, CS_CLIENTMSG_TYPE, i, mem::transmute(&mut buffer));
                 assert_eq!(CS_SUCCEED, ret);
 
-                result.push((
-                    buffer.msgnumber,
-                    CStr::from_ptr(buffer.msgstring.as_ptr()).to_string_lossy().trim_end().to_string()
-                ));
+                result.push(Error::new(
+                    Some(error::Type::Cs),
+                    Some(buffer.msgnumber),
+                    CStr::from_ptr(buffer.msgstring.as_ptr()).to_string_lossy().trim_end()))
             }
 
             /* Client messages */
@@ -947,8 +942,10 @@ impl Connection {
                 assert_eq!(CS_SUCCEED, ret);
 
                 let msgnumber = buffer.msgnumber as i32;
-                let text = CStr::from_ptr(mem::transmute(buffer.msgstring.as_ptr())).to_string_lossy().trim_end().to_string();
-                result.push((msgnumber, text));
+                result.push(Error::new(
+                    Some(error::Type::Client),
+                    Some(msgnumber),
+                    CStr::from_ptr(mem::transmute(buffer.msgstring.as_ptr())).to_string_lossy().trim_end()));
             }
 
             /* server messages */
@@ -961,8 +958,10 @@ impl Connection {
                 assert_eq!(CS_SUCCEED, ret);
 
                 let msgnumber = buffer.msgnumber as i32;
-                let text = CStr::from_ptr(mem::transmute(buffer.text.as_ptr())).to_string_lossy().trim_end().to_string();
-                result.push((msgnumber, text));
+                result.push(Error::new(
+                    Some(error::Type::Server),
+                    Some(msgnumber),
+                    CStr::from_ptr(mem::transmute(buffer.text.as_ptr())).to_string_lossy().trim_end()));
             }
         }
         result
@@ -973,7 +972,7 @@ impl Connection {
         if errors.is_empty() {
             None
         } else {
-            Some(Error::from_message(&errors.last().unwrap().1))
+            Some(errors[0].clone())
         }
     }
 
