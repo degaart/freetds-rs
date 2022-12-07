@@ -306,61 +306,6 @@ impl ResultSet {
             }
         })
     }
-
-    fn get_daterec(&mut self, col: impl TryInto<usize>) -> Result<Option<CS_DATEREC>> {
-        self.convert_buffer(col, |conn, buffer, fmt| {
-            match fmt.datatype {
-                CS_DATE_TYPE => {
-                    unsafe {
-                        assert!(buffer.len() == mem::size_of::<CS_DATE>());
-                        let buf: *const CS_DATE = mem::transmute(buffer.as_ptr());
-                        Ok(conn.crack_date(*buf)?)
-                    }
-                },
-                CS_TIME_TYPE => {
-                    unsafe {
-                        assert!(buffer.len() == mem::size_of::<CS_TIME>());
-                        let buf: *const CS_TIME = mem::transmute(buffer.as_ptr());
-                        Ok(conn.crack_time(*buf)?)
-                    }
-                },
-                CS_DATETIME_TYPE => {
-                    unsafe {
-                        assert!(buffer.len() == mem::size_of::<CS_DATETIME>());
-                        let buf: *const CS_DATETIME = mem::transmute(buffer.as_ptr());
-                        Ok(conn.crack_datetime(*buf)?)
-                    }
-                },
-                CS_DATETIME4_TYPE => {
-                    unsafe {
-                        assert!(buffer.len() == mem::size_of::<CS_DATETIME4>());
-                        let buf: *const CS_DATETIME4 = mem::transmute(buffer.as_ptr());
-                        Ok(conn.crack_smalldatetime(*buf)?)
-                    }
-                },
-                _ => {
-                    let mut dstfmt: CS_DATAFMT = Default::default();
-                    dstfmt.datatype = CS_DATETIME_TYPE;
-                    dstfmt.maxlength = mem::size_of::<CS_DATETIME>() as i32;
-                    dstfmt.format = CS_FMT_UNUSED as i32;
-                    dstfmt.count = 1;
-
-                    let mut dstdata: Vec<u8> = Vec::new();
-                    dstdata.resize(dstfmt.maxlength as usize, Default::default());
-                    let dstlen = conn.convert(
-                        &fmt, &buffer,
-                        &dstfmt,
-                        &mut dstdata)?;
-                    
-                    assert!(dstlen == mem::size_of::<CS_DATETIME>());
-                    unsafe {
-                        let buf: *const CS_DATETIME = mem::transmute(dstdata.as_ptr());
-                        Ok(conn.crack_datetime(*buf)?)
-                    }
-                }
-            }
-        })
-    }
     
     pub fn get_date(&mut self, col: impl TryInto<usize>) -> Result<Option<NaiveDate>> {
         match self.get_daterec(col)? {
@@ -430,6 +375,61 @@ impl ResultSet {
                     let dstlen = conn.convert(&fmt, &buffer, &dstfmt, &mut dstdata)?;
                     dstdata.resize(dstlen, Default::default());
                     Ok(dstdata)
+                }
+            }
+        })
+    }
+
+    fn get_daterec(&mut self, col: impl TryInto<usize>) -> Result<Option<CS_DATEREC>> {
+        self.convert_buffer(col, |conn, buffer, fmt| {
+            match fmt.datatype {
+                CS_DATE_TYPE => {
+                    unsafe {
+                        assert!(buffer.len() == mem::size_of::<CS_DATE>());
+                        let buf: *const CS_DATE = mem::transmute(buffer.as_ptr());
+                        Ok(conn.crack_date(*buf)?)
+                    }
+                },
+                CS_TIME_TYPE => {
+                    unsafe {
+                        assert!(buffer.len() == mem::size_of::<CS_TIME>());
+                        let buf: *const CS_TIME = mem::transmute(buffer.as_ptr());
+                        Ok(conn.crack_time(*buf)?)
+                    }
+                },
+                CS_DATETIME_TYPE => {
+                    unsafe {
+                        assert!(buffer.len() == mem::size_of::<CS_DATETIME>());
+                        let buf: *const CS_DATETIME = mem::transmute(buffer.as_ptr());
+                        Ok(conn.crack_datetime(*buf)?)
+                    }
+                },
+                CS_DATETIME4_TYPE => {
+                    unsafe {
+                        assert!(buffer.len() == mem::size_of::<CS_DATETIME4>());
+                        let buf: *const CS_DATETIME4 = mem::transmute(buffer.as_ptr());
+                        Ok(conn.crack_smalldatetime(*buf)?)
+                    }
+                },
+                _ => {
+                    let mut dstfmt: CS_DATAFMT = Default::default();
+                    dstfmt.datatype = CS_DATETIME_TYPE;
+                    dstfmt.maxlength = mem::size_of::<CS_DATETIME>() as i32;
+                    dstfmt.format = CS_FMT_UNUSED as i32;
+                    dstfmt.count = 1;
+
+                    let mut dstdata: Vec<u8> = Vec::new();
+                    dstdata.resize(dstfmt.maxlength as usize, Default::default());
+                    let dstlen = conn.convert(
+                        &fmt, &buffer,
+                        &dstfmt,
+                        &mut dstdata)?;
+                    
+                    assert!(dstlen == mem::size_of::<CS_DATETIME>());
+                    unsafe {
+                        let buf: *const CS_DATETIME = mem::transmute(dstdata.as_ptr());
+                        Ok(conn.crack_datetime(*buf)?)
+                    }
                 }
             }
         })
@@ -922,8 +922,10 @@ impl Connection {
             
             for i in 0..count {
                 let mut buffer: CS_CLIENTMSG = Default::default();
-                let ret = cs_diag(conn.ctx_handle, CS_GET, CS_CLIENTMSG_TYPE, i, mem::transmute(&mut buffer));
-                assert_eq!(CS_SUCCEED, ret);
+                let ret = cs_diag(conn.ctx_handle, CS_GET, CS_CLIENTMSG_TYPE, i + 1, mem::transmute(&mut buffer));
+                if ret != CS_SUCCEED {
+                    assert_eq!(CS_SUCCEED, ret);
+                }
 
                 result.push(Error::new(
                     Some(error::Type::Cs),
