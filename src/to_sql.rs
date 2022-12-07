@@ -12,6 +12,21 @@ impl ToSql for Null {
     }
 }
 
+impl ToSql for String {
+    fn to_sql(&self) -> String {
+        let mut result = String::new();
+        result.push('\'');
+        for c in self.chars() {
+            result.push(c);
+            if c == '\'' {
+                result.push(c);
+            }
+        }
+        result.push('\'');
+        return result;
+    }
+}
+
 impl ToSql for &str {
     fn to_sql(&self) -> String {
         let mut result = String::new();
