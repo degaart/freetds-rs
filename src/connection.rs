@@ -1,3 +1,6 @@
+/* deprecated NaiveDate constructors which panic */
+#![allow(deprecated)]
+
 use std::ffi::CStr;
 use std::sync::{Arc, Mutex};
 use std::{ptr, mem, ffi::CString};
@@ -7,6 +10,41 @@ use crate::command::CommandArg;
 use crate::error;
 use crate::{property::Property, Result, error::Error, command::Command};
 use crate::to_sql::ToSql;
+
+pub enum ColumnId {
+    I32(i32),
+    String(String),
+}
+
+impl From<i32> for ColumnId {
+    fn from(value: i32) -> Self {
+        Self::I32(value)
+    }
+}
+
+impl From<i64> for ColumnId {
+    fn from(value: i64) -> Self {
+        Self::I32(value.try_into().expect("Invalid column id"))
+    }
+}
+
+impl From<usize> for ColumnId {
+    fn from(value: usize) -> Self {
+        Self::I32(value.try_into().expect("Invalid column id"))
+    }
+}
+
+impl From<String> for ColumnId {
+    fn from(value: String) -> Self {
+        Self::String(value)
+    }
+}
+
+impl From<&str> for ColumnId {
+    fn from(value: &str) -> Self {
+        Self::String(String::from(value))
+    }
+}
 
 #[derive(PartialEq, Debug)]
 enum TextPiece {
@@ -59,6 +97,7 @@ pub struct ResultSet {
 }
 
 impl ResultSet {
+
     fn new(conn: Connection, results: Vec<Rows>, status: Option<i32>, messages: Vec<Error>) -> Self {
         Self { conn, results, pos: Default::default(), status, messages }
     }
@@ -135,7 +174,7 @@ impl ResultSet {
         }
     }
 
-    fn convert_buffer<T>(&mut self, col: impl TryInto<usize>, mut sink: impl FnMut(&mut Connection, &Vec<u8>, &CS_DATAFMT) -> Result<T>) -> Result<Option<T>> {
+    fn convert_buffer<T>(&mut self, col: impl Into<ColumnId>, mut sink: impl FnMut(&mut Connection, &Vec<u8>, &CS_DATAFMT) -> Result<T>) -> Result<Option<T>> {
         if self.pos.is_none() {
             return Err(Error::from_message("Invalid state"));
         }
@@ -156,9 +195,21 @@ impl ResultSet {
         }
 
         let row = &results.rows[pos];
-        let col: usize = col
-            .try_into()
-            .map_err(|_| Error::from_message("Invalid column index"))?;
+        let col: ColumnId = col.into();
+        let col: usize = match col {
+            ColumnId::I32(i) => i.try_into().expect("Invalid column index"),
+            ColumnId::String(s) => {
+                let mut column_index: Option<usize> = None;
+                for i in 0..self.column_count()? {
+                    if self.column_name(i)?.unwrap_or(String::from("")) == s {
+                        column_index = Some(i);
+                        break;
+                    }
+                }
+                column_index.expect("Invalid column name")
+            }
+        };
+
         if col >= results.columns.len() {
             return Err(Error::from_message("Invalid column index"));
         }
@@ -176,7 +227,7 @@ impl ResultSet {
         }
     }
 
-    pub fn get_i64(&mut self, col: impl TryInto<usize>) -> Result<Option<i64>> {
+    pub fn get_i64(&mut self, col: impl Into<ColumnId>) -> Result<Option<i64>> {
         self.convert_buffer(col, |conn, buffer, fmt| {
             match fmt.datatype {
                 CS_LONG_TYPE => {
@@ -209,7 +260,7 @@ impl ResultSet {
         })
     }
 
-    pub fn get_i32(&mut self, col: impl TryInto<usize>) -> Result<Option<i32>> {
+    pub fn get_i32(&mut self, col: impl Into<ColumnId>) -> Result<Option<i32>> {
         self.convert_buffer(col, |conn, buffer, fmt| {
             match fmt.datatype {
                 CS_INT_TYPE => {
@@ -242,7 +293,15 @@ impl ResultSet {
         })
     }
 
-    pub fn get_f64(&mut self, col: impl TryInto<usize>) -> Result<Option<f64>> {
+    pub fn get_bool(&mut self, col: impl Into<ColumnId>) -> Result<Option<bool>> {
+        let val = self.get_i64(col)?;
+        match val {
+            None => Ok(None),
+            Some(val) => Ok(Some(val != 0))
+        }
+    }
+
+    pub fn get_f64(&mut self, col: impl Into<ColumnId>) -> Result<Option<f64>> {
         self.convert_buffer(col, |conn, buffer, fmt| {
             match fmt.datatype {
                 CS_FLOAT_TYPE => {
@@ -275,7 +334,7 @@ impl ResultSet {
         })
     }
 
-    pub fn get_string(&mut self, col: impl TryInto<usize>) -> Result<Option<String>> {
+    pub fn get_string(&mut self, col: impl Into<ColumnId>) -> Result<Option<String>> {
         self.convert_buffer(col, |conn, buffer, fmt| {
             match fmt.datatype {
                 CS_CHAR_TYPE | CS_LONGCHAR_TYPE | CS_VARCHAR_TYPE | CS_UNICHAR_TYPE | CS_TEXT_TYPE | CS_UNITEXT_TYPE => {
@@ -307,7 +366,7 @@ impl ResultSet {
         })
     }
     
-    pub fn get_date(&mut self, col: impl TryInto<usize>) -> Result<Option<NaiveDate>> {
+    pub fn get_date(&mut self, col: impl Into<ColumnId>) -> Result<Option<NaiveDate>> {
         match self.get_daterec(col)? {
             None => Ok(None),
             Some(date_rec) => {
@@ -319,7 +378,7 @@ impl ResultSet {
         }
     }
 
-    pub fn get_time(&mut self, col: impl TryInto<usize>) -> Result<Option<NaiveTime>> {
+    pub fn get_time(&mut self, col: impl Into<ColumnId>) -> Result<Option<NaiveTime>> {
         match self.get_daterec(col)? {
             None => Ok(None),
             Some(date_rec) => {
@@ -332,7 +391,7 @@ impl ResultSet {
         }
     }
 
-    pub fn get_datetime(&mut self, col: impl TryInto<usize>) -> Result<Option<NaiveDateTime>> {
+    pub fn get_datetime(&mut self, col: impl Into<ColumnId>) -> Result<Option<NaiveDateTime>> {
         match self.get_daterec(col)? {
             None => Ok(None),
             Some(date_rec) => {
@@ -348,7 +407,7 @@ impl ResultSet {
         }
     }
 
-    pub fn get_blob(&mut self, col: impl TryInto<usize>) -> Result<Option<Vec<u8>>> {
+    pub fn get_blob(&mut self, col: impl Into<ColumnId>) -> Result<Option<Vec<u8>>> {
         self.convert_buffer(col, |conn, buffer, fmt| {
             match fmt.datatype {
                 CS_BINARY_TYPE | CS_LONGBINARY_TYPE | CS_IMAGE_TYPE => {
@@ -380,7 +439,7 @@ impl ResultSet {
         })
     }
 
-    fn get_daterec(&mut self, col: impl TryInto<usize>) -> Result<Option<CS_DATEREC>> {
+    fn get_daterec(&mut self, col: impl Into<ColumnId>) -> Result<Option<CS_DATEREC>> {
         self.convert_buffer(col, |conn, buffer, fmt| {
             match fmt.datatype {
                 CS_DATE_TYPE => {
@@ -749,6 +808,11 @@ impl Connection {
             }
             bind.buffer.resize(column.fmt.maxlength as usize, 0);
             column.fmt.count = 1;
+            let name_slice: Vec<u8> = column.fmt.name.iter()
+                .take(column.fmt.namelen as usize)
+                .map(|c| *c as u8)
+                .collect();
+            column.name = String::from(String::from_utf8_lossy(&name_slice));
 
             unsafe {
                 cmd.bind_unsafe(
