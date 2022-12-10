@@ -583,7 +583,7 @@ mod tests {
         assert_eq!(rs.get_i32(1).unwrap().unwrap(), 2);
         assert_eq!(rs.get_i64(2).unwrap().unwrap(), 5000000000);
         assert_eq!(rs.get_f64(3).unwrap().unwrap(), 3.14);
-        assert_eq!(rs.get_datetime(4).unwrap().unwrap(), NaiveDate::from_ymd(1986, 7, 5).and_hms_milli(10, 30, 31, 100));
+        assert_eq!(rs.get_datetime(4).unwrap().unwrap(), NaiveDate::from_ymd_opt(1986, 7, 5).unwrap().and_hms_milli_opt(10, 30, 31, 100).unwrap());
         assert_eq!(rs.get_f64(5).unwrap().unwrap(), 3.14);
         assert_eq!(rs.get_blob(6).unwrap().unwrap(), vec![0xDE, 0xAD, 0xBE, 0xEF]);
         assert_eq!(rs.get_string(7).unwrap().unwrap(), "ccc".to_string());
@@ -632,7 +632,7 @@ mod tests {
                 &2i32,
                 &5000000000i64,
                 &3.14f64,
-                &NaiveDate::from_ymd(1986, 7, 5).and_hms_milli(10, 30, 31, 100),
+                &NaiveDate::from_ymd_opt(1986, 7, 5).unwrap().and_hms_milli_opt(10, 30, 31, 100).unwrap(),
                 &vec![0xDEu8, 0xADu8, 0xBEu8, 0xEFu8],
                 &"bbb"
             ])
@@ -647,7 +647,7 @@ mod tests {
         assert_eq!(2, rs.get_i32(1).unwrap().unwrap());
         assert_eq!(5000000000, rs.get_i64(2).unwrap().unwrap());
         assert_eq!(3.14, rs.get_f64(3).unwrap().unwrap());
-        assert_eq!(NaiveDate::from_ymd(1986, 7, 5).and_hms_milli(10, 30, 31, 100), rs.get_datetime(4).unwrap().unwrap());
+        assert_eq!(NaiveDate::from_ymd_opt(1986, 7, 5).unwrap().and_hms_milli_opt(10, 30, 31, 100).unwrap(), rs.get_datetime(4).unwrap().unwrap());
         assert_eq!(vec![0xDEu8, 0xADu8, 0xBEu8, 0xEFu8], rs.get_blob(5).unwrap().unwrap());
         assert_eq!("bbb", rs.get_string(6).unwrap().unwrap());
     }
@@ -676,7 +676,7 @@ mod tests {
         params.push(&2i64);
         params.push(&3.14f64);
 
-        let param5 = NaiveDate::from_ymd(1986, 7, 5).and_hms(10, 30, 31);
+        let param5 = NaiveDate::from_ymd_opt(1986, 7, 5).unwrap().and_hms_opt(10, 30, 31).unwrap();
         params.push(&param5);
 
         let param6 = vec![0xDE_u8, 0xAD_u8, 0xBE_u8, 0xEF_u8];
