@@ -3,21 +3,10 @@ use std::sync::{Arc, Mutex};
 use std::{ptr, mem, ffi::CString};
 use freetds_sys::*;
 use crate::command::CommandArg;
-use crate::error;
+use crate::{error, parse_query, generate_query};
 use crate::result_set::{ResultSet, Rows, Column, Row};
 use crate::{property::Property, Result, error::Error, command::Command};
 use crate::to_sql::ToSql;
-
-#[derive(PartialEq, Debug)]
-enum TextPiece {
-    Literal(String),
-    Placeholder
-}
-
-struct ParsedQuery {
-    pieces: Vec<TextPiece>,
-    param_count: usize
-}
 
 #[derive(Debug, Clone, Default)]
 struct Bind {
@@ -228,12 +217,12 @@ impl Connection {
         if !self.connected {
             return Err(Error::from_message("Invalid connection state"));
         }
-        let parsed_query = Self::parse_query(text.as_ref());
+        let parsed_query = parse_query(text.as_ref());
         if parsed_query.param_count != params.len() {
             return Err(Error::from_message("Invalid parameter count"))
         }
 
-        let text = Self::generate_query(&parsed_query, params);
+        let text = generate_query(&parsed_query, params);
 
         let mut command = Command::new(self.clone());
         command.command(CS_LANG_CMD, CommandArg::String(&text), CS_UNUSED)?;
@@ -369,95 +358,6 @@ impl Connection {
             rows.push(row);
         }
         Ok(Rows::new(columns, rows))
-    }
-
-    fn parse_query(text: impl AsRef<str>) -> ParsedQuery {
-        let mut pieces: Vec<TextPiece> = Vec::new();
-        let mut param_count: usize = 0;
-        let mut cur = String::new();
-        let mut it = text.as_ref().chars().peekable();
-        loop {
-            let c = it.next();
-            match c {
-                None => {
-                    break;
-                },
-                Some(c) => {
-                    match c {
-                        '\'' | '"' => {
-                            cur.push(c);
-                            while let Some(c1) = it.next() {
-                                cur.push(c1);
-                                if c1 == c {
-                                    break;
-                                }
-                            }
-                        },
-                        '/' => {
-                            if it.peek().unwrap_or(&'\0') == &'*' {
-                                cur.push(c);
-                                while let Some(c1) = it.next() {
-                                    cur.push(c1);
-                                    if c1 == '*' && it.peek().unwrap_or(&'\0') == &'/' {
-                                        break;
-                                    }
-                                }
-                            } else {
-                                cur.push(c);
-                            }
-                        },
-                        '-' => {
-                            if it.peek().unwrap_or(&'\0') == &'-' {
-                                cur.push(c);
-                                while let Some(c1) = it.next() {
-                                    cur.push(c1);
-                                }
-                            }
-                        },
-                        '?' => {
-                            if cur.len() > 0 {
-                                pieces.push(TextPiece::Literal(cur.clone()));
-                                cur.clear();
-                            }
-                            pieces.push(TextPiece::Placeholder);
-                            param_count += 1;
-                        },
-                        _ => {
-                            cur.push(c);
-                        }
-                    }
-                }
-            }
-        }
-    
-        if cur.len() > 0 {
-            pieces.push(TextPiece::Literal(cur.clone()));
-        }
-        
-        ParsedQuery { pieces, param_count }
-    }
-
-    fn generate_query(query: &ParsedQuery, params: &[&dyn ToSql]) -> String {
-        let mut result = String::new();
-        let mut params = params.iter();
-        for piece in &query.pieces {
-            result.push_str(&match piece {
-                TextPiece::Literal(s) => {
-                    s.to_string()
-                },
-                TextPiece::Placeholder => {
-                    match params.next() {
-                        Some(value) => {
-                            value.to_sql()
-                        },
-                        None => {
-                            "null".to_string()
-                        }
-                    }
-                }
-            });
-        }
-        return result;
     }
 
     fn diag_init(ctx: *mut CS_CONTEXT, conn: *mut CS_CONNECTION) {
@@ -646,9 +546,8 @@ unsafe impl Send for Connection {}
 mod tests {
     use std::thread;
     use std::time::Duration;
-
     use chrono::NaiveDate;
-    use crate::connection::TextPiece;
+    use crate::{parse_query, generate_query};
     use crate::to_sql::ToSql;
     use super::Connection;
 
@@ -769,37 +668,6 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_query() {
-        let s = "?, '?', ?, \"?\", ? /* que? */, ? -- ?no?";
-        let query = Connection::parse_query(s);
-        assert_eq!(query.pieces.len(), 8);
-        assert_eq!(query.param_count, 4);
-
-        let concated: String = query.pieces.iter().map(
-            |p| match p {
-                TextPiece::Literal(s) => {
-                    &s
-                },
-                TextPiece::Placeholder => {
-                    "?"
-                }
-            })
-            .collect();
-        assert_eq!(s, concated);
-    }
-
-    #[test]
-    fn test_quotes() {
-        let mut conn = connect();
-        let mut rs = conn
-            .execute("select '''ab''', ?", &[&"\'cd\'"])
-            .unwrap();
-        assert!(rs.next());
-        assert_eq!("\'ab\'", rs.get_string(0).unwrap().unwrap());
-        assert_eq!("\'cd\'", rs.get_string(1).unwrap().unwrap());
-    }
-
-    #[test]
     fn test_generate_query() {
         let s = "string: ?, i32: ?, i64: ?, f64: ?, date: ?, image: ?";
         let mut params: Vec<&dyn ToSql> = Vec::new();
@@ -814,8 +682,8 @@ mod tests {
         let param6 = vec![0xDE_u8, 0xAD_u8, 0xBE_u8, 0xEF_u8];
         params.push(&param6);
 
-        let parsed_query = Connection::parse_query(s);
-        let generated = Connection::generate_query(&parsed_query, &params);
+        let parsed_query = parse_query(s);
+        let generated = generate_query(&parsed_query, &params);
         assert_eq!("string: 'aaa', i32: 1, i64: 2, f64: 3.14, date: '1986/07/05 10:30:31', image: 0xDEADBEEF", generated);
     }
 
