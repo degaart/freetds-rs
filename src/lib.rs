@@ -5,6 +5,7 @@ pub mod error;
 pub mod util;
 pub mod to_sql;
 pub mod null;
+pub mod column_id;
 
 pub use connection::Connection;
 pub use error::Error;
