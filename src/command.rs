@@ -8,7 +8,7 @@ use crate::connection::{CSConnection, Connection};
 use crate::Result;
 use crate::error::Error;
 
-pub struct CSCommand {
+pub(crate) struct CSCommand {
     handle: *mut CS_COMMAND
 }
 
@@ -43,7 +43,7 @@ pub enum CommandArg<'a> {
 }
 
 #[derive(Clone)]
-pub struct Command {
+pub(crate) struct Command {
     pub conn: Connection,
     pub cmd: Arc<Mutex<CSCommand>>
 }
