@@ -1,6 +1,3 @@
-/* deprecated NaiveDate constructors which panic */
-#![allow(deprecated)]
-
 use std::ffi::CStr;
 use std::sync::{Arc, Mutex};
 use std::{ptr, mem, ffi::CString};
@@ -370,10 +367,15 @@ impl ResultSet {
         match self.get_daterec(col)? {
             None => Ok(None),
             Some(date_rec) => {
-                Ok(Some(NaiveDate::from_ymd(
-                    date_rec.dateyear,
-                    (date_rec.datemonth + 1) as u32,
-                    date_rec.datedmonth as u32)))
+                Ok(
+                    Some(
+                        NaiveDate::from_ymd_opt(
+                            date_rec.dateyear,
+                            (date_rec.datemonth + 1) as u32,
+                            date_rec.datedmonth as u32)
+                        .ok_or(error::Error::new(None, None, "Invalid date"))?
+                    )
+                )
             }
         }
     }
@@ -382,11 +384,12 @@ impl ResultSet {
         match self.get_daterec(col)? {
             None => Ok(None),
             Some(date_rec) => {
-                Ok(Some(NaiveTime::from_hms_milli(
+                Ok(Some(NaiveTime::from_hms_milli_opt(
                     date_rec.datehour as u32, 
                     date_rec.dateminute as u32, 
                     date_rec.datesecond as u32, 
-                    date_rec.datemsecond as u32)))
+                    date_rec.datemsecond as u32)
+                    .ok_or(error::Error::new(None, None, "Invalid time"))?))
             }
         }
     }
@@ -395,14 +398,16 @@ impl ResultSet {
         match self.get_daterec(col)? {
             None => Ok(None),
             Some(date_rec) => {
-                let date = NaiveDate::from_ymd(
+                let date = NaiveDate::from_ymd_opt(
                     date_rec.dateyear,
                     (date_rec.datemonth + 1) as u32,
-                    date_rec.datedmonth as u32);
-                Ok(Some(date.and_hms_milli(date_rec.datehour as u32, 
+                    date_rec.datedmonth as u32)
+                    .ok_or(error::Error::new(None, None, "Invalid date"))?;
+                Ok(Some(date.and_hms_milli_opt(date_rec.datehour as u32, 
                     date_rec.dateminute as u32, 
                     date_rec.datesecond as u32, 
-                    date_rec.datemsecond as u32)))
+                    date_rec.datemsecond as u32)
+                    .ok_or(error::Error::new(None, None, "Invalid time"))?))
             }
         }
     }
