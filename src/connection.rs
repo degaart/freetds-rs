@@ -26,7 +26,7 @@ struct Bind {
     indicator: i16
 }
 
-pub struct CSConnection {
+pub(crate) struct CSConnection {
     pub ctx_handle: *mut CS_CONTEXT,
     pub conn_handle: *mut CS_CONNECTION,
 }
@@ -79,7 +79,7 @@ impl Drop for CSConnection {
 
 #[derive(Clone)]
 pub struct Connection {
-    pub conn: Arc<Mutex<CSConnection>>,
+    pub(crate) conn: Arc<Mutex<CSConnection>>,
     connected: bool
 }
 
