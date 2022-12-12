@@ -1,3 +1,4 @@
+#[derive(Clone)]
 pub enum ColumnId {
     I32(i32),
     String(String),

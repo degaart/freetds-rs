@@ -1,8 +1,7 @@
-use std::mem;
-
+use std::{mem, rc::Rc, ops::Deref};
 use chrono::{NaiveDate, NaiveTime, NaiveDateTime};
 use freetds_sys::*;
-use crate::{Connection, Error, Result, column_id::ColumnId};
+use crate::{Connection, Error, Result, column_id::ColumnId, ParamValue};
 
 #[derive(Debug, Default, Clone)]
 pub struct Column {
@@ -12,7 +11,7 @@ pub struct Column {
 
 #[derive(Debug)]
 pub struct Row {
-    pub(crate) buffers: Vec<Option<Vec<u8>>>
+    pub(crate) buffers: Vec<Option<Rc<Vec<u8>>>>
 }
 
 #[derive(Debug)]
@@ -114,7 +113,7 @@ impl ResultSet {
         }
     }
 
-    fn convert_buffer<T>(&mut self, col: impl Into<ColumnId>, mut sink: impl FnMut(&mut Connection, &Vec<u8>, &CS_DATAFMT) -> Result<T>) -> Result<Option<T>> {
+    fn get_buffer(&mut self, col: impl Into<ColumnId>) -> Result<Option<(CS_DATAFMT, Rc<Vec<u8>>)>> {
         if self.pos.is_none() {
             return Err(Error::from_message("Invalid state"));
         }
@@ -161,76 +160,257 @@ impl ResultSet {
                 Ok(None)
             },
             Some(buffer) => {
-                let result = sink(&mut self.conn, buffer, &column.fmt)?;
-                Ok(Some(result))
+                Ok(Some((column.fmt.clone(), Rc::clone(buffer))))
+            }
+        }
+    }
+
+    fn convert<T>(&mut self, srcfmt: &CS_DATAFMT, srcbuffer: &[u8], dstdatatype: i32) -> Result<T>
+    where
+        T: Copy
+    {
+        let mut dstfmt: CS_DATAFMT = Default::default();
+        dstfmt.datatype = dstdatatype;
+        dstfmt.maxlength = mem::size_of::<T>() as i32;
+        dstfmt.format = CS_FMT_UNUSED as i32;
+        dstfmt.count = 1;
+
+        let mut dstdata: Vec<u8> = vec![0u8; dstfmt.maxlength as usize];
+        let dstlen = self.conn.convert(
+            &srcfmt, srcbuffer,
+            &dstfmt,
+            &mut dstdata)?;
+        
+        assert_eq!(dstlen, mem::size_of::<T>());
+        unsafe {
+            let buf: *const T = mem::transmute(dstdata.as_ptr());
+            Ok(*buf)
+        }
+    }
+
+    pub fn get_value(&mut self, col: impl Into<ColumnId>) -> Result<Option<ParamValue>> {
+        if self.pos.is_none() {
+            return Err(Error::from_message("Invalid state"));
+        }
+        
+        let pos = self.pos.unwrap();
+        if pos >= self.results.len() {
+            return Err(Error::from_message("Invalid state"));
+        }
+        
+        if self.results[pos].pos.is_none() {
+            return Err(Error::from_message("Invalid state"));
+        }
+
+        let pos = self.results[pos].pos.unwrap();
+        if pos >= self.results[pos].rows.len() {
+            return Err(Error::from_message("Invalid state"));
+        }
+
+        let row = &self.results[pos].rows[pos];
+        let col: ColumnId = col.into();
+        let col: usize = match col {
+            ColumnId::I32(i) => i.try_into().expect("Invalid column index"),
+            ColumnId::String(s) => {
+                let mut column_index: Option<usize> = None;
+                for i in 0..self.column_count()? {
+                    if self.column_name(i)?.unwrap_or(String::from("")) == s {
+                        column_index = Some(i);
+                        break;
+                    }
+                }
+                column_index.expect("Invalid column name")
+            }
+        };
+
+        if col >= self.results[pos].columns.len() {
+            return Err(Error::from_message("Invalid column index"));
+        }
+
+        let column = self.results[pos].columns[col].clone();
+        let buffer = row.buffers[col].clone();
+        drop(row);
+
+        match buffer {
+            None => {
+                Ok(None)
+            },
+            Some(buffer) => {
+                match column.fmt.datatype {
+                    CS_BINARY_TYPE | CS_IMAGE_TYPE => {
+                        Ok(Some(ParamValue::Blob(Rc::clone(&buffer).deref().clone())))
+                    },
+                    CS_CHAR_TYPE | CS_TEXT_TYPE | CS_MONEY_TYPE | CS_MONEY4_TYPE | CS_DECIMAL_TYPE => {
+                        Ok(Some(ParamValue::String(String::from_utf8_lossy(&buffer).to_string())))
+                    },
+                    CS_UNICHAR_TYPE => {
+                        let mut dstfmt: CS_DATAFMT = Default::default();
+                        dstfmt.maxlength = buffer.len() as i32;
+                        dstfmt.format = CS_FMT_UNUSED as i32;
+                        dstfmt.count = 1;
+
+                        let mut dstdata: Vec<u8> = vec![0u8; dstfmt.maxlength as usize];
+                        let dstlen = self.conn.convert(&column.fmt, &buffer, &dstfmt, &mut dstdata)?;
+                        Ok(Some(ParamValue::String(String::from_utf8_lossy(&dstdata.as_slice()[0..dstlen]).to_string())))
+                    },
+                    CS_DATE_TYPE | CS_TIME_TYPE | CS_DATETIME_TYPE | CS_DATETIME4_TYPE => {
+                        let datatype = column.fmt.datatype;
+                        let daterec = self.convert_date(&column.fmt, &buffer)?;
+                        Ok(Some(match datatype {
+                            CS_DATE_TYPE => {
+                                ParamValue::NaiveDate(
+                                    NaiveDate::from_ymd_opt(
+                                        daterec.dateyear,
+                                        (daterec.datemonth + 1) as u32,
+                                        daterec.datedmonth as u32
+                                    )
+                                    .ok_or(Error::new(None, None, "Invalid date"))?
+                                )
+                            },
+                            CS_TIME_TYPE => {
+                                ParamValue::NaiveTime(
+                                    NaiveTime::from_hms_milli_opt(
+                                        daterec.datehour as u32,
+                                        daterec.dateminute as u32,
+                                        daterec.datesecond as u32,
+                                        daterec.datemsecond as u32
+                                    )
+                                    .ok_or(Error::new(None, None, "Invalid time"))?
+                                )
+                            },
+                            CS_DATETIME_TYPE | CS_DATETIME4_TYPE => {
+                                ParamValue::NaiveDateTime(
+                                    NaiveDate::from_ymd_opt(
+                                        daterec.dateyear,
+                                        (daterec.datemonth + 1) as u32,
+                                        daterec.datedmonth as u32
+                                    )
+                                    .ok_or(Error::new(None, None, "Invalid date"))?
+                                    .and_hms_milli_opt(
+                                        daterec.datehour as u32,
+                                        daterec.dateminute as u32,
+                                        daterec.datesecond as u32,
+                                        daterec.datemsecond as u32
+                                    )
+                                    .ok_or(Error::new(None, None, "Invalid date"))?
+                                )
+                            },
+                            _ => panic!("Invalid code path")
+                        }))
+                    },
+                    CS_INT_TYPE => {
+                        unsafe {
+                            assert_eq!(buffer.len(), mem::size_of::<i32>());
+                            let ptr: *const i32 = mem::transmute(buffer.as_ptr());
+                            Ok(Some(ParamValue::I32(*ptr)))
+                        }
+                    },
+                    CS_BIT_TYPE | CS_TINYINT_TYPE | CS_SMALLINT_TYPE => {
+                        let mut dstfmt: CS_DATAFMT = Default::default();
+                        dstfmt.datatype = CS_INT_TYPE;
+                        dstfmt.maxlength = mem::size_of::<i32>() as i32;
+                        dstfmt.format = CS_FMT_UNUSED as i32;
+                        dstfmt.count = 1;
+
+                        let mut dstdata: Vec<u8> = vec![0u8; dstfmt.maxlength as usize];
+                        let dstlen = self.conn.convert(
+                            &column.fmt, &buffer,
+                            &dstfmt,
+                            &mut dstdata)?;
+                        assert_eq!(dstlen, mem::size_of::<i32>());
+                        unsafe {
+                            let ptr: *const i32 = mem::transmute(buffer.as_ptr());
+                            Ok(Some(ParamValue::I32(*ptr)))
+                        }
+                    },
+                    CS_NUMERIC_TYPE => {
+                        if column.fmt.precision == CS_DEF_PREC && column.fmt.scale == 0 {
+                            let mut dstfmt: CS_DATAFMT = Default::default();
+                            dstfmt.datatype = CS_BIGINT_TYPE;
+                            dstfmt.maxlength = mem::size_of::<i64>() as i32;
+                            dstfmt.format = CS_FMT_UNUSED as i32;
+                            dstfmt.count = 1;
+
+                            let mut dstdata: Vec<u8> = vec![0u8; dstfmt.maxlength as usize];
+                            let dstlen = self.conn.convert(
+                                &column.fmt, &buffer,
+                                &dstfmt,
+                                &mut dstdata)?;
+                            assert_eq!(dstlen, mem::size_of::<i64>());
+                            unsafe {
+                                Ok(Some(ParamValue::I64(mem::transmute(buffer.as_ptr()))))
+                            }
+                        } else {
+                            let mut dstfmt: CS_DATAFMT = Default::default();
+                            dstfmt.maxlength = buffer.len() as i32;
+                            dstfmt.format = CS_FMT_UNUSED as i32;
+                            dstfmt.count = 1;
+
+                            let mut dstdata: Vec<u8> = vec![0u8; dstfmt.maxlength as usize];
+                            let dstlen = self.conn.convert(&column.fmt, &buffer, &dstfmt, &mut dstdata)?;
+                            Ok(Some(ParamValue::String(String::from_utf8_lossy(&dstdata.as_slice()[0..dstlen]).to_string())))
+                        }
+                    },
+                    CS_REAL_TYPE  => {
+                        unsafe {
+                            assert_eq!(buffer.len(), mem::size_of::<f32>());
+                            Ok(Some(ParamValue::F64(mem::transmute(buffer.as_ptr()))))
+                        }
+                    },
+                    CS_FLOAT_TYPE => {
+                        unsafe {
+                            assert_eq!(buffer.len(), mem::size_of::<f64>());
+                            Ok(Some(ParamValue::F64(mem::transmute(buffer.as_ptr()))))
+                        }
+                    },
+                    _ => {
+                        Err(Error::new(None, None, "Unsupported datatype"))
+                    }
+                }
             }
         }
     }
 
     pub fn get_i64(&mut self, col: impl Into<ColumnId>) -> Result<Option<i64>> {
-        self.convert_buffer(col, |conn, buffer, fmt| {
-            match fmt.datatype {
-                CS_LONG_TYPE => {
-                    unsafe {
-                        assert_eq!(buffer.len(), mem::size_of::<i64>());
-                        let buf: *const i64 = mem::transmute(buffer.as_ptr());
-                        Ok(*buf)
-                    }
-                },
-                _ => {
-                    let mut dstfmt: CS_DATAFMT = Default::default();
-                    dstfmt.datatype = CS_LONG_TYPE;
-                    dstfmt.maxlength = mem::size_of::<i64>() as i32;
-                    dstfmt.format = CS_FMT_UNUSED as i32;
-                    dstfmt.count = 1;
-    
-                    let mut dstdata: Vec<u8> = vec![0u8; dstfmt.maxlength as usize];
-                    let dstlen = conn.convert(
-                        &fmt, &buffer,
-                        &dstfmt,
-                        &mut dstdata)?;
-                    
-                    assert_eq!(dstlen, mem::size_of::<i64>());
-                    unsafe {
-                        let buf: *const i64 = mem::transmute(dstdata.as_ptr());
-                        Ok(*buf)
+        let buffer = self.get_buffer(col)?;
+        match buffer {
+            None => Ok(None),
+            Some((fmt, buffer)) => {
+                match fmt.datatype {
+                    CS_LONG_TYPE => {
+                        unsafe {
+                            assert_eq!(buffer.len(), mem::size_of::<i64>());
+                            let buf: *const i64 = mem::transmute(buffer.deref().as_ptr());
+                            Ok(Some(*buf))
+                        }
+                    },
+                    _ => {
+                        Ok(Some(self.convert::<i64>(&fmt, buffer.as_ref().as_slice(), CS_LONG_TYPE)?))
                     }
                 }
             }
-        })
+        }
     }
 
     pub fn get_i32(&mut self, col: impl Into<ColumnId>) -> Result<Option<i32>> {
-        self.convert_buffer(col, |conn, buffer, fmt| {
-            match fmt.datatype {
-                CS_INT_TYPE => {
-                    unsafe {
-                        assert_eq!(buffer.len(), mem::size_of::<i32>());
-                        let buf: *const i32 = mem::transmute(buffer.as_ptr());
-                        Ok(*buf)
-                    }
-                },
-                _ => {
-                    let mut dstfmt: CS_DATAFMT = Default::default();
-                    dstfmt.datatype = CS_INT_TYPE;
-                    dstfmt.maxlength = mem::size_of::<i32>() as i32;
-                    dstfmt.format = CS_FMT_UNUSED as i32;
-                    dstfmt.count = 1;
-    
-                    let mut dstdata: Vec<u8> = vec![0u8; dstfmt.maxlength as usize];
-                    let dstlen = conn.convert(
-                        &fmt, &buffer,
-                        &dstfmt,
-                        &mut dstdata)?;
-                    
-                    assert_eq!(dstlen, mem::size_of::<i32>());
-                    unsafe {
-                        let buf: *const i32 = mem::transmute(dstdata.as_ptr());
-                        Ok(*buf)
+        let buffer = self.get_buffer(col)?;
+        match buffer {
+            None => Ok(None),
+            Some((fmt, buffer)) => {
+                match fmt.datatype {
+                    CS_INT_TYPE => {
+                        unsafe {
+                            assert_eq!(buffer.len(), mem::size_of::<i32>());
+                            let buf: *const i32 = mem::transmute(buffer.deref().as_ptr());
+                            Ok(Some(*buf))
+                        }
+                    },
+                    _ => {
+                        Ok(Some(self.convert::<i32>(&fmt, buffer.as_ref().as_slice(), CS_INT_TYPE)?))
                     }
                 }
             }
-        })
+        }
     }
 
     pub fn get_bool(&mut self, col: impl Into<ColumnId>) -> Result<Option<bool>> {
@@ -242,80 +422,79 @@ impl ResultSet {
     }
 
     pub fn get_f64(&mut self, col: impl Into<ColumnId>) -> Result<Option<f64>> {
-        self.convert_buffer(col, |conn, buffer, fmt| {
-            match fmt.datatype {
-                CS_FLOAT_TYPE => {
-                    unsafe {
-                        assert_eq!(buffer.len(), mem::size_of::<f64>());
-                        let buf: *const f64 = mem::transmute(buffer.as_ptr());
-                        Ok(*buf)
-                    }
-                },
-                _ => {
-                    let mut dstfmt: CS_DATAFMT = Default::default();
-                    dstfmt.datatype = CS_FLOAT_TYPE;
-                    dstfmt.maxlength = mem::size_of::<f64>() as i32;
-                    dstfmt.format = CS_FMT_UNUSED as i32;
-                    dstfmt.count = 1;
-    
-                    let mut dstdata: Vec<u8> = vec![0u8; dstfmt.maxlength as usize];
-                    let dstlen = conn.convert(
-                        &fmt, &buffer,
-                        &dstfmt,
-                        &mut dstdata)?;
-                    
-                    assert_eq!(dstlen, mem::size_of::<f64>());
-                    unsafe {
-                        let buf: *const f64 = mem::transmute(dstdata.as_ptr());
-                        Ok(*buf)
+        let buffer = self.get_buffer(col)?;
+        match buffer {
+            None => Ok(None),
+            Some((fmt, buffer)) => {
+                match fmt.datatype {
+                    CS_FLOAT_TYPE => {
+                        unsafe {
+                            assert_eq!(buffer.len(), mem::size_of::<f64>());
+                            let buf: *const f64 = mem::transmute(buffer.deref().as_ptr());
+                            Ok(Some(*buf))
+                        }
+                    },
+                    CS_REAL_TYPE => {
+                        unsafe {
+                            assert_eq!(buffer.len(), mem::size_of::<f32>());
+                            let buf: *const f32 = mem::transmute(buffer.deref().as_ptr());
+                            Ok(Some(Into::<f64>::into(*buf)))
+                        }
+                    },
+                    _ => {
+                        Ok(Some(self.convert::<f64>(&fmt, buffer.as_ref().as_slice(), CS_FLOAT_TYPE)?))
                     }
                 }
             }
-        })
+        }
     }
 
     pub fn get_string(&mut self, col: impl Into<ColumnId>) -> Result<Option<String>> {
-        self.convert_buffer(col, |conn, buffer, fmt| {
-            match fmt.datatype {
-                CS_CHAR_TYPE | CS_LONGCHAR_TYPE | CS_VARCHAR_TYPE | CS_UNICHAR_TYPE | CS_TEXT_TYPE | CS_UNITEXT_TYPE => {
-                    let value = String::from_utf8_lossy(buffer);
-                    Ok(value.to_string())
-                },
-                _ => {
-                    let mut dstfmt: CS_DATAFMT = Default::default();
-                    dstfmt.datatype = CS_CHAR_TYPE;
-                    dstfmt.maxlength = match fmt.datatype {
-                        CS_BINARY_TYPE | CS_LONGBINARY_TYPE | CS_IMAGE_TYPE => {
-                            ((buffer.len() * 2) + 16) as i32
-                        },
-                        _ => {
-                            128
-                        }
-                    };
-                    dstfmt.format = CS_FMT_UNUSED as i32;
-                    dstfmt.count = 1;
-    
-                    let mut dstdata: Vec<u8> = vec![0u8; dstfmt.maxlength as usize];
-                    let dstlen = conn.convert(
-                        &fmt, &buffer,
-                        &dstfmt,
-                        &mut dstdata)?;
-                    Ok(String::from_utf8_lossy(&dstdata.as_slice()[0..dstlen]).to_string())
+        let buffer = self.get_buffer(col)?;
+        match buffer {
+            None => Ok(None),
+            Some((fmt, buffer)) => {
+                match fmt.datatype {
+                    CS_CHAR_TYPE | CS_TEXT_TYPE => {
+                        let value = String::from_utf8_lossy(&buffer);
+                        Ok(Some(value.to_string()))
+                    },
+                    _ => {
+                        let mut dstfmt: CS_DATAFMT = Default::default();
+                        dstfmt.datatype = CS_CHAR_TYPE;
+                        dstfmt.maxlength = match fmt.datatype {
+                            CS_BINARY_TYPE | CS_LONGBINARY_TYPE | CS_IMAGE_TYPE => {
+                                ((buffer.len() * 2) + 16) as i32
+                            },
+                            _ => {
+                                128
+                            }
+                        };
+                        dstfmt.format = CS_FMT_UNUSED as i32;
+                        dstfmt.count = 1;
+
+                        let mut dstdata: Vec<u8> = vec![0u8; dstfmt.maxlength as usize];
+                        let dstlen = self.conn.convert(
+                            &fmt, &buffer,
+                            &dstfmt,
+                            &mut dstdata)?;
+                        Ok(Some(String::from_utf8_lossy(&dstdata.as_slice()[0..dstlen]).to_string()))
+                    }
                 }
             }
-        })
+        }
     }
     
     pub fn get_date(&mut self, col: impl Into<ColumnId>) -> Result<Option<NaiveDate>> {
         match self.get_daterec(col)? {
             None => Ok(None),
-            Some(date_rec) => {
+            Some(dt) => {
                 Ok(
                     Some(
                         NaiveDate::from_ymd_opt(
-                            date_rec.dateyear,
-                            (date_rec.datemonth + 1) as u32,
-                            date_rec.datedmonth as u32)
+                            dt.dateyear,
+                            (dt.datemonth + 1) as u32,
+                            dt.datedmonth as u32)
                         .ok_or(Error::new(None, None, "Invalid date"))?
                     )
                 )
@@ -356,90 +535,95 @@ impl ResultSet {
     }
 
     pub fn get_blob(&mut self, col: impl Into<ColumnId>) -> Result<Option<Vec<u8>>> {
-        self.convert_buffer(col, |conn, buffer, fmt| {
-            match fmt.datatype {
-                CS_BINARY_TYPE | CS_LONGBINARY_TYPE | CS_IMAGE_TYPE => {
-                    Ok(buffer.clone())
-                },
-                CS_VARBINARY_TYPE => {
-                    unsafe {
-                        assert!(buffer.len() == mem::size_of::<CS_VARBINARY>());
-                        let buf: *const CS_VARBINARY = mem::transmute(buffer.as_ptr());
-                        let len = (*buf).len as usize;
-                        let res: Vec<u8> = (*buf).array.iter().take(len).map(|c| *c as u8).collect();
-                        Ok(res)
+        match self.get_buffer(col)? {
+            None => Ok(None),
+            Some((fmt, buffer)) => {
+                match fmt.datatype {
+                    CS_BINARY_TYPE | CS_IMAGE_TYPE => {
+                        Ok(Some(buffer.deref().clone()))
+                    },
+                    CS_VARBINARY_TYPE => {
+                        panic!("Not implemented yet");
+                    },
+                    _ => {
+                        let mut dstfmt: CS_DATAFMT = Default::default();
+                        dstfmt.datatype = CS_BINARY_TYPE;
+                        dstfmt.maxlength = fmt.maxlength;
+                        dstfmt.format = CS_FMT_UNUSED as i32;
+                        dstfmt.count = 1;
+        
+                        let mut dstdata: Vec<u8> = Vec::new();
+                        dstdata.resize(dstfmt.maxlength as usize, Default::default());
+                        let dstlen = self.conn.convert(&fmt, &buffer, &dstfmt, &mut dstdata)?;
+                        dstdata.resize(dstlen, Default::default());
+                        Ok(Some(dstdata))
                     }
-                },
-                _ => {
-                    let mut dstfmt: CS_DATAFMT = Default::default();
-                    dstfmt.datatype = CS_BINARY_TYPE;
-                    dstfmt.maxlength = fmt.maxlength;
-                    dstfmt.format = CS_FMT_UNUSED as i32;
-                    dstfmt.count = 1;
-
-                    let mut dstdata: Vec<u8> = Vec::new();
-                    dstdata.resize(dstfmt.maxlength as usize, Default::default());
-                    let dstlen = conn.convert(&fmt, &buffer, &dstfmt, &mut dstdata)?;
-                    dstdata.resize(dstlen, Default::default());
-                    Ok(dstdata)
                 }
             }
-        })
+        }
+    }
+
+    fn convert_date(&mut self, fmt: &CS_DATAFMT, buffer: &[u8]) -> Result<CS_DATEREC> {
+        match fmt.datatype {
+            CS_DATE_TYPE => {
+                unsafe {
+                    assert!(buffer.len() == mem::size_of::<CS_DATE>());
+                    let buf: *const CS_DATE = mem::transmute(buffer.as_ptr());
+                    Ok(self.conn.crack_date(*buf)?)
+                }
+            },
+            CS_TIME_TYPE => {
+                unsafe {
+                    assert!(buffer.len() == mem::size_of::<CS_TIME>());
+                    let buf: *const CS_TIME = mem::transmute(buffer.as_ptr());
+                    Ok(self.conn.crack_time(*buf)?)
+                }
+            },
+            CS_DATETIME_TYPE => {
+                unsafe {
+                    assert!(buffer.len() == mem::size_of::<CS_DATETIME>());
+                    let buf: *const CS_DATETIME = mem::transmute(buffer.as_ptr());
+                    Ok(self.conn.crack_datetime(*buf)?)
+                }
+            },
+            CS_DATETIME4_TYPE => {
+                unsafe {
+                    assert!(buffer.len() == mem::size_of::<CS_DATETIME4>());
+                    let buf: *const CS_DATETIME4 = mem::transmute(buffer.as_ptr());
+                    Ok(self.conn.crack_smalldatetime(*buf)?)
+                }
+            },
+            _ => {
+                Err(Error::new(None, None, "Invalid conversion"))
+                // let mut dstfmt: CS_DATAFMT = Default::default();
+                // dstfmt.datatype = CS_DATETIME_TYPE;
+                // dstfmt.maxlength = mem::size_of::<CS_DATETIME>() as i32;
+                // dstfmt.format = CS_FMT_UNUSED as i32;
+                // dstfmt.count = 1;
+
+                // let mut dstdata: Vec<u8> = vec![0u8; dstfmt.maxlength as usize];
+                // let dstlen = self.conn.convert(
+                //     &fmt, &buffer,
+                //     &dstfmt,
+                //     &mut dstdata)?;
+                
+                // assert!(dstlen == mem::size_of::<CS_DATETIME>());
+                // unsafe {
+                //     let buf: *const CS_DATETIME = mem::transmute(dstdata.as_ptr());
+                //     Ok(self.conn.crack_datetime(*buf)?)
+                // }
+            }
+        }
     }
 
     fn get_daterec(&mut self, col: impl Into<ColumnId>) -> Result<Option<CS_DATEREC>> {
-        self.convert_buffer(col, |conn, buffer, fmt| {
-            match fmt.datatype {
-                CS_DATE_TYPE => {
-                    unsafe {
-                        assert!(buffer.len() == mem::size_of::<CS_DATE>());
-                        let buf: *const CS_DATE = mem::transmute(buffer.as_ptr());
-                        Ok(conn.crack_date(*buf)?)
-                    }
-                },
-                CS_TIME_TYPE => {
-                    unsafe {
-                        assert!(buffer.len() == mem::size_of::<CS_TIME>());
-                        let buf: *const CS_TIME = mem::transmute(buffer.as_ptr());
-                        Ok(conn.crack_time(*buf)?)
-                    }
-                },
-                CS_DATETIME_TYPE => {
-                    unsafe {
-                        assert!(buffer.len() == mem::size_of::<CS_DATETIME>());
-                        let buf: *const CS_DATETIME = mem::transmute(buffer.as_ptr());
-                        Ok(conn.crack_datetime(*buf)?)
-                    }
-                },
-                CS_DATETIME4_TYPE => {
-                    unsafe {
-                        assert!(buffer.len() == mem::size_of::<CS_DATETIME4>());
-                        let buf: *const CS_DATETIME4 = mem::transmute(buffer.as_ptr());
-                        Ok(conn.crack_smalldatetime(*buf)?)
-                    }
-                },
-                _ => {
-                    let mut dstfmt: CS_DATAFMT = Default::default();
-                    dstfmt.datatype = CS_DATETIME_TYPE;
-                    dstfmt.maxlength = mem::size_of::<CS_DATETIME>() as i32;
-                    dstfmt.format = CS_FMT_UNUSED as i32;
-                    dstfmt.count = 1;
-
-                    let mut dstdata: Vec<u8> = Vec::new();
-                    dstdata.resize(dstfmt.maxlength as usize, Default::default());
-                    let dstlen = conn.convert(
-                        &fmt, &buffer,
-                        &dstfmt,
-                        &mut dstdata)?;
-                    
-                    assert!(dstlen == mem::size_of::<CS_DATETIME>());
-                    unsafe {
-                        let buf: *const CS_DATETIME = mem::transmute(dstdata.as_ptr());
-                        Ok(conn.crack_datetime(*buf)?)
-                    }
-                }
+        let buffer = self.get_buffer(col)?;
+        match buffer {
+            None => Ok(None),
+            Some((fmt, buffer)) => {
+                Ok(Some(self.convert_date(&fmt, buffer.deref())?))
             }
-        })
+        }
     }
 
     pub fn status(&self) -> Option<i32> {

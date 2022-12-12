@@ -1,9 +1,11 @@
 use std::ffi::CStr;
+use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::{ptr, mem, ffi::CString};
 use freetds_sys::*;
 use crate::command::CommandArg;
-use crate::{error, parse_query, generate_query};
+use crate::null::Null;
+use crate::{error, parse_query, generate_query, Statement};
 use crate::result_set::{ResultSet, Rows, Column, Row};
 use crate::{property::Property, Result, error::Error, command::Command};
 use crate::to_sql::ToSql;
@@ -78,7 +80,10 @@ impl Connection {
         let conn_guard = conn.lock().unwrap();
         Self::diag_init(conn_guard.ctx_handle, conn_guard.conn_handle);
         drop(conn_guard);
-        Self { conn, connected: false }
+        Self {
+            conn,
+            connected: false
+        }
     }
 
     pub fn set_client_charset(&mut self, charset: impl AsRef<str>) -> Result<()> {
@@ -209,7 +214,8 @@ impl Connection {
             self.connected = true;
             Ok(())
         } else {
-            Err(self.get_error().unwrap_or(Error::from_message("ct_connect failed")))
+            let err = self.get_error();
+            Err(err.unwrap_or(Error::from_message("ct_connect failed")))
         }
     }
 
@@ -218,11 +224,101 @@ impl Connection {
             return Err(Error::from_message("Invalid connection state"));
         }
         let parsed_query = parse_query(text.as_ref());
-        if parsed_query.param_count != params.len() {
+        if parsed_query.params.len() != params.len() {
             return Err(Error::from_message("Invalid parameter count"))
         }
 
-        let text = generate_query(&parsed_query, params);
+        let text = generate_query(
+            &parsed_query,
+            params
+                .iter()
+                .map(|i| *i)
+        );
+
+        let mut command = Command::new(self.clone());
+        command.command(CS_LANG_CMD, CommandArg::String(&text), CS_UNUSED)?;
+        command.send()?;
+
+        let mut results: Vec<Rows> = Vec::new();
+        let mut status_result: Option<i32> = None;
+        let mut failed = false;
+        let mut errors: Vec<Error> = Vec::new();
+        loop {
+            let (ret, res_type) = command.results()?;
+            if !ret {
+                break;
+            }
+
+            /*
+                Collect diag messages because command.results() clears them
+            */
+            errors.extend(self.diag_get().iter().map(|e| e.clone()));
+
+            match res_type {
+                CS_ROW_RESULT => {
+                    let row_result = Self::fetch_result(&mut command)?;
+                    results.push(row_result);
+                },
+                CS_STATUS_RESULT => {
+                    let row_result = Self::fetch_result(&mut command)?;
+                    let row: &Vec<u8> = row_result.rows[0].buffers[0].as_ref().unwrap();
+                    let status: i32;
+                    unsafe {
+                        let buf: *const i32 = mem::transmute(row.as_ptr());
+                        status = *buf;
+                    }
+
+                    match status_result {
+                        None => {
+                            status_result = Some(status)
+                        },
+                        Some(s) => {
+                            if s == 0 {
+                                status_result = Some(status);
+                            }
+                        }
+                    };
+                },
+                CS_COMPUTE_RESULT | CS_CURSOR_RESULT | CS_PARAM_RESULT => {
+                    command.cancel(CS_CANCEL_CURRENT)?;
+                },
+                CS_CMD_FAIL => {
+                    failed = true;
+                },
+                _ => {
+                    /* Do nothing, most notably, ignore CS_CMD_SUCCEED and CS_CMD_DONE */
+                }
+            }
+        }
+
+        if failed {
+            if errors.is_empty() {
+                return Err(Error::from_message("Query execution resulted in error"));
+            } else {
+                return Err(errors.last().unwrap().clone());
+            }
+        }
+
+        Ok(ResultSet::new(self.clone(), results, status_result, errors))
+    }
+
+    pub fn execute_statement(&mut self, st: &Statement) -> Result<ResultSet> {
+        if !self.connected {
+            return Err(Error::from_message("Invalid connection state"));
+        }
+        
+        let params: Vec<&dyn ToSql> = st.params.iter()
+            .map(|param| {
+                match param {
+                    None => &Null {} as &dyn ToSql,
+                    Some(param) => param as &dyn ToSql
+                }
+            })
+            .collect();
+        let text = generate_query(
+            &st.query,
+            params.iter().map(|p| *p)
+        );
 
         let mut command = Command::new(self.clone());
         command.command(CS_LANG_CMD, CommandArg::String(&text), CS_UNUSED)?;
@@ -348,7 +444,7 @@ impl Connection {
                             }
                         };
 
-                        row.buffers.push(Some(buffer));
+                        row.buffers.push(Some(Rc::new(buffer)));
                     },
                     _ => {
                         return Err(Error::from_message("Data truncation occured"));
@@ -453,7 +549,14 @@ impl Connection {
         if errors.is_empty() {
             None
         } else {
-            Some(errors[0].clone())
+            let err = errors.iter()
+                .find(|e| {
+                    match e.code() {
+                        None => true,
+                        Some(code) => code != 5701 && code != 5704
+                    }
+                });
+            err.cloned()
         }
     }
 
@@ -547,7 +650,7 @@ mod tests {
     use std::thread;
     use std::time::Duration;
     use chrono::NaiveDate;
-    use crate::{parse_query, generate_query};
+    use crate::{parse_query, generate_query, Statement};
     use crate::to_sql::ToSql;
     use super::Connection;
 
@@ -683,7 +786,7 @@ mod tests {
         params.push(&param6);
 
         let parsed_query = parse_query(s);
-        let generated = generate_query(&parsed_query, &params);
+        let generated = generate_query(&parsed_query, params.iter().map(|param| *param));
         assert_eq!("string: 'aaa', i32: 1, i64: 2, f64: 3.14, date: '1986/07/05 10:30:31', image: 0xDEADBEEF", generated);
     }
 
@@ -754,5 +857,22 @@ mod tests {
         assert_eq!("No such account -- nothing changed.", res.error().unwrap().desc());
     }
 
+    #[test]
+    fn test_statement() {
+        let mut st = Statement::new("select ?, :param1, :param2, ?");
+        st.set_param(0, 1);
+        st.set_param("param1", 2);
+        st.set_param("param2", "3");
+        st.set_param(3, "4");
+
+        let mut conn = connect();
+        let mut rs = conn.execute_statement(&st).unwrap();
+        assert_eq!(rs.next(), true);
+        assert_eq!(rs.get_i32(0).unwrap(), Some(1));
+        assert_eq!(rs.get_i32(1).unwrap(), Some(2));
+        assert_eq!(rs.get_string(2).unwrap(), Some(String::from("3")));
+        assert_eq!(rs.get_string(3).unwrap(), Some(String::from("4")));
+    }
+    
 }
 

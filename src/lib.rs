@@ -7,6 +7,8 @@ pub mod to_sql;
 pub mod null;
 pub mod column_id;
 pub mod result_set;
+pub mod param_value;
+pub mod statement;
 
 pub use connection::Connection;
 pub use error::Error;
@@ -15,21 +17,39 @@ pub use result_set::ResultSet;
 pub use column_id::ColumnId;
 use to_sql::ToSql;
 pub type Result<T, E = error::Error> = core::result::Result<T, E>;
+pub use param_value::ParamValue;
+pub use statement::Statement;
 
-#[derive(PartialEq, Debug)]
+#[derive(PartialEq, Debug, Clone)]
 pub(crate) enum TextPiece {
     Literal(String),
     Placeholder
 }
 
+#[derive(Debug, Clone)]
 pub(crate) struct ParsedQuery {
     pieces: Vec<TextPiece>,
-    param_count: usize
+    params: Vec<Option<String>>,
+}
+
+impl ParsedQuery {
+    
+    pub(crate) fn param_index(&self, name: &str) -> Option<usize> {
+        for (i, n) in self.params.iter().enumerate() {
+            if let Some(n) = n {
+                if n == name {
+                    return Some(i);
+                }
+            }
+        }
+        None
+    }
+
 }
 
 pub(crate) fn parse_query(text: impl AsRef<str>) -> ParsedQuery {
     let mut pieces: Vec<TextPiece> = Vec::new();
-    let mut param_count: usize = 0;
+    let mut params: Vec<Option<String>> = Vec::new();
     let mut cur = String::new();
     let mut it = text.as_ref().chars().peekable();
     loop {
@@ -50,23 +70,24 @@ pub(crate) fn parse_query(text: impl AsRef<str>) -> ParsedQuery {
                         }
                     },
                     '/' => {
+                        cur.push(c);
                         if it.peek().unwrap_or(&'\0') == &'*' {
-                            cur.push(c);
                             while let Some(c1) = it.next() {
                                 cur.push(c1);
                                 if c1 == '*' && it.peek().unwrap_or(&'\0') == &'/' {
                                     break;
                                 }
                             }
-                        } else {
-                            cur.push(c);
                         }
                     },
                     '-' => {
+                        cur.push(c);
                         if it.peek().unwrap_or(&'\0') == &'-' {
-                            cur.push(c);
                             while let Some(c1) = it.next() {
                                 cur.push(c1);
+                                if c1 == '\n' {
+                                    break;
+                                }
                             }
                         }
                     },
@@ -76,7 +97,34 @@ pub(crate) fn parse_query(text: impl AsRef<str>) -> ParsedQuery {
                             cur.clear();
                         }
                         pieces.push(TextPiece::Placeholder);
-                        param_count += 1;
+                        params.push(None);
+                    },
+                    ':' => {
+                        if let None = it.peek() {
+                            cur.push(c);
+                        } else {
+                            if !cur.is_empty() {
+                                pieces.push(TextPiece::Literal(cur.clone()));
+                                cur.clear();
+                            }
+
+                            let mut name = String::new();
+                            while let Some(c) = it.peek() {
+                                if c.is_alphanumeric() || *c == '_' {
+                                    name.push(*c);
+                                    it.next();
+                                } else {
+                                    break;
+                                }
+                            }
+
+                            if name.is_empty() {
+                                cur.push(c);
+                            } else {
+                                pieces.push(TextPiece::Placeholder);
+                                params.push(Some(name));
+                            }
+                        }
                     },
                     _ => {
                         cur.push(c);
@@ -90,12 +138,14 @@ pub(crate) fn parse_query(text: impl AsRef<str>) -> ParsedQuery {
         pieces.push(TextPiece::Literal(cur.clone()));
     }
     
-    ParsedQuery { pieces, param_count }
+    ParsedQuery { pieces, params }
 }
 
-pub(crate) fn generate_query(query: &ParsedQuery, params: &[&dyn ToSql]) -> String {
+pub(crate) fn generate_query<'a, I> (query: &ParsedQuery, mut params: I) -> String
+where
+    I: Iterator<Item = &'a dyn ToSql>
+{
     let mut result = String::new();
-    let mut params = params.iter();
     for piece in &query.pieces {
         result.push_str(&match piece {
             TextPiece::Literal(s) => {
@@ -116,7 +166,6 @@ pub(crate) fn generate_query(query: &ParsedQuery, params: &[&dyn ToSql]) -> Stri
     return result;
 }
 
-
 #[cfg(test)]
 mod tests {
     use crate::{parse_query, TextPiece, Connection};
@@ -134,20 +183,73 @@ mod tests {
         conn
     }
 
+
+    #[test]
+    fn test_named_param() {
+        let s = ":param";
+        let query = parse_query(s);
+        println!("{:?}", query.pieces);
+        assert_eq!(query.pieces[0], TextPiece::Placeholder);
+        assert_eq!(query.params[0], Some(String::from("param")));
+        assert_eq!(query.pieces.len(), 1);
+        assert_eq!(query.params.len(), 1);
+
+        let s = "select :param";
+        let query = parse_query(s);
+        println!("{:?}", query.pieces);
+        assert_eq!(query.pieces[0], TextPiece::Literal(String::from("select ")));
+        assert_eq!(query.pieces[1], TextPiece::Placeholder);
+        assert_eq!(query.params[0], Some(String::from("param")));
+        assert_eq!(query.pieces.len(), 2);
+        assert_eq!(query.params.len(), 1);
+
+        let s = "select :param,";
+        let query = parse_query(s);
+        println!("{:?}", query.pieces);
+        assert_eq!(query.pieces[0], TextPiece::Literal(String::from("select ")));
+        assert_eq!(query.pieces[1], TextPiece::Placeholder);
+        assert_eq!(query.pieces[2], TextPiece::Literal(String::from(",")));
+        assert_eq!(query.params[0], Some(String::from("param")));
+        assert_eq!(query.pieces.len(), 3);
+        assert_eq!(query.params.len(), 1);
+    }
+
     #[test]
     fn test_parse_query() {
-        let s = "?, '?', ?, \"?\", ? /* que? */, ? -- ?no?";
+        let s = "?, '?', ?, \"?\", ? /* que? */, ? -- ?no?\nselect ?, :param1\n";
         let query = parse_query(s);
-        assert_eq!(query.pieces.len(), 8);
-        assert_eq!(query.param_count, 4);
 
+        assert_eq!(query.pieces[0], TextPiece::Placeholder);
+        assert_eq!(query.pieces[1], TextPiece::Literal(String::from(", '?', ")));
+        assert_eq!(query.pieces[2], TextPiece::Placeholder);
+        assert_eq!(query.pieces[3], TextPiece::Literal(String::from(", \"?\", ")));
+        assert_eq!(query.pieces[4], TextPiece::Placeholder);
+        assert_eq!(query.pieces[5], TextPiece::Literal(String::from(" /* que? */, ")));
+        assert_eq!(query.pieces[6], TextPiece::Placeholder);
+        assert_eq!(query.pieces[7], TextPiece::Literal(String::from(" -- ?no?\nselect ")));
+        assert_eq!(query.pieces[8], TextPiece::Placeholder);
+        assert_eq!(query.pieces[9], TextPiece::Literal(String::from(", ")));
+        assert_eq!(query.pieces[10], TextPiece::Placeholder);
+        assert_eq!(query.pieces[11], TextPiece::Literal(String::from("\n")));
+
+        println!("{:?}", query.pieces);
+        println!("{:?}", query.params);
+        
+        assert_eq!(query.pieces.len(), 12);
+        assert_eq!(query.params.len(), 6);
+
+        let mut param_iter = query.params.iter();
         let concated: String = query.pieces.iter().map(
             |p| match p {
                 TextPiece::Literal(s) => {
-                    &s
+                    String::from(s)
                 },
                 TextPiece::Placeholder => {
-                    "?"
+                    let param = param_iter.next().unwrap();
+                    match param {
+                        Some(name) => format!(":{}", name),
+                        None => String::from("?"),
+                    }
                 }
             })
             .collect();

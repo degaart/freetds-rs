@@ -1,9 +1,8 @@
 use chrono::{NaiveDateTime, NaiveDate, NaiveTime};
-use crate::null::Null;
+use crate::{null::Null, ParamValue};
 
 pub trait ToSql {
     fn to_sql(&self) -> String;
-
 }
 
 impl ToSql for Null {
@@ -112,6 +111,22 @@ where
             None => {
                 "null".to_string()
             },
+        }
+    }
+}
+
+impl ToSql for ParamValue {
+    fn to_sql(&self) -> String {
+        match self {
+            ParamValue::Null => String::from("null"),
+            ParamValue::String(s) => s.to_sql(),
+            ParamValue::I32(i) => i.to_sql(),
+            ParamValue::I64(i) => i.to_sql(),
+            ParamValue::F64(f) => f.to_sql(),
+            ParamValue::NaiveDate(d) => d.to_sql(),
+            ParamValue::NaiveTime(t) => t.to_sql(),
+            ParamValue::NaiveDateTime(dt) => dt.to_sql(),
+            ParamValue::Blob(b) => b.to_sql(),
         }
     }
 }
