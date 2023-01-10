@@ -9,6 +9,7 @@ use crate::{error, parse_query, generate_query, Statement};
 use crate::result_set::{ResultSet, Rows, Column, Row};
 use crate::{property::Property, Result, error::Error, command::Command};
 use crate::to_sql::ToSql;
+use log::debug;
 
 #[derive(Debug, Clone, Default)]
 struct Bind {
@@ -319,6 +320,7 @@ impl Connection {
             &st.query,
             params.iter().map(|p| *p)
         );
+        debug!("Generated statement: {}", text);
 
         let mut command = Command::new(self.clone());
         command.command(CS_LANG_CMD, CommandArg::String(&text), CS_UNUSED)?;
@@ -585,6 +587,12 @@ impl Connection {
         }
     }
 
+    pub fn db_name(&mut self) -> Result<String> {
+        let mut rs = self.execute("select db_name()", &[])?;
+        assert!(rs.next());
+        Ok(rs.get_string(0)?.ok_or(Error::new(None, None, "Cannot get database name"))?)
+    }
+
     pub(crate) fn convert(&mut self, srcfmt: &CS_DATAFMT, srcdata: &[u8], dstfmt: &CS_DATAFMT, dstdata: &mut [u8]) -> Result<usize> {
         self.diag_clear();
         let mut dstlen: i32 = Default::default();
@@ -649,10 +657,13 @@ unsafe impl Send for Connection {}
 mod tests {
     use std::thread;
     use std::time::Duration;
-    use chrono::NaiveDate;
-    use crate::{parse_query, generate_query, Statement};
+    use chrono::{NaiveDate, NaiveTime};
+    use rust_decimal::Decimal;
+    use crate::{parse_query, generate_query, Statement, ParamValue};
     use crate::to_sql::ToSql;
     use super::Connection;
+
+    const SERVER: &str = "***REMOVED***";
 
     fn connect() -> Connection {
         let mut conn = Connection::new();
@@ -663,7 +674,7 @@ mod tests {
         conn.set_tds_version_50().unwrap();
         conn.set_login_timeout(5).unwrap();
         conn.set_timeout(5).unwrap();
-        conn.connect("***REMOVED***:2025").unwrap();
+        conn.connect(&format!("{}:2025", SERVER)).unwrap();
         conn
     }
 
@@ -692,6 +703,54 @@ mod tests {
         assert_eq!(rs.get_string(7).unwrap().unwrap(), "ccc".to_string());
         assert!(rs.get_string(8).unwrap().is_none());
         assert!(!rs.next());
+    }
+
+    #[test]
+    fn test_get_value() {
+        let mut conn = connect();
+        let text = 
+            "
+            select
+                cast(0xDEADBEEF as binary(4)) as binary,
+                cast(0xDEADBEEF as image) as image,
+                cast('deadbeef' as char(8)) as char,
+                cast('deadbeef' as text) as text,
+                cast('deadbeef' as unichar(8)) as unichar,
+                cast('1986-07-04' as date) as date,
+                cast('10:01:02.3' as time) as time,
+                cast('1986-07-04 10:01:02.3' as datetime) as datetime,
+                cast(2147483647 as int) as int,
+                cast(1 as bit) as bit,
+                cast(2 as tinyint) as tinyint,
+                cast(3 as smallint) as smallint,
+                cast(1.23456789 as numeric(9,8)) as numeric,
+                cast(2147483648 as numeric) as long,
+                cast(42.0 as real) as real,
+                cast(1.23456789 as float) as float            
+            ";
+        let mut rs = conn.execute(text, &[]).unwrap();
+        assert!(rs.next());
+        assert_eq!(Some(ParamValue::Blob(vec![0xDE, 0xAD, 0xBE, 0xEF])), rs.get_value("binary").unwrap());
+        assert_eq!(Some(ParamValue::Blob(vec![0xDE, 0xAD, 0xBE, 0xEF])), rs.get_value("image").unwrap());
+        assert_eq!(Some(ParamValue::String(String::from("deadbeef"))), rs.get_value("char").unwrap());
+        assert_eq!(Some(ParamValue::String(String::from("deadbeef"))), rs.get_value("text").unwrap());
+        assert_eq!(Some(ParamValue::String(String::from("deadbeef"))), rs.get_value("unichar").unwrap());
+        assert_eq!(Some(ParamValue::Date(NaiveDate::from_ymd_opt(1986, 7, 4).unwrap())), rs.get_value("date").unwrap());
+        assert_eq!(Some(ParamValue::Time(NaiveTime::from_hms_milli_opt(10, 1, 2, 300).unwrap())), rs.get_value("time").unwrap());
+        assert_eq!(Some(ParamValue::DateTime(
+            NaiveDate::from_ymd_opt(1986, 7, 4)
+                .unwrap()
+                .and_hms_milli_opt(10, 1, 2, 300)
+                .unwrap())),
+            rs.get_value("datetime").unwrap());
+        assert_eq!(Some(ParamValue::I32(2147483647)), rs.get_value("int").unwrap());
+        assert_eq!(Some(ParamValue::I32(1)), rs.get_value("bit").unwrap());
+        assert_eq!(Some(ParamValue::I32(2)), rs.get_value("tinyint").unwrap());
+        assert_eq!(Some(ParamValue::I32(3)), rs.get_value("smallint").unwrap());
+        assert_eq!(Some(ParamValue::Decimal(Decimal::from_str_exact("1.23456789").unwrap())), rs.get_value("numeric").unwrap());
+        assert_eq!(Some(ParamValue::I64(2147483648)), rs.get_value("long").unwrap());
+        assert_eq!(Some(ParamValue::F64(42.0)), rs.get_value("real").unwrap());
+        assert_eq!(Some(ParamValue::F64(1.23456789)), rs.get_value("float").unwrap());
     }
 
     #[test]
@@ -873,6 +932,56 @@ mod tests {
         assert_eq!(rs.get_string(2).unwrap(), Some(String::from("3")));
         assert_eq!(rs.get_string(3).unwrap(), Some(String::from("4")));
     }
-    
+
+    #[test]
+    fn test_database() {
+        /* Test connecting correctly sets the database */
+        let mut conn = Connection::new();
+        conn.set_client_charset("UTF-8").unwrap();
+        conn.set_username("sa").unwrap();
+        conn.set_password("").unwrap();
+        conn.set_database("master").unwrap();
+        conn.set_tds_version_50().unwrap();
+        conn.set_login_timeout(5).unwrap();
+        conn.set_timeout(5).unwrap();
+        conn.connect(&format!("{}:2025", SERVER)).unwrap();
+
+        let mut rs = conn.execute("select db_name()", &[]).unwrap();
+        assert!(rs.next());
+        assert_eq!(Some(String::from("master")), rs.get_string(0).unwrap());
+
+        let mut conn = Connection::new();
+        conn.set_client_charset("UTF-8").unwrap();
+        conn.set_username("sa").unwrap();
+        conn.set_password("").unwrap();
+        conn.set_database("sybsystemprocs").unwrap();
+        conn.set_tds_version_50().unwrap();
+        conn.set_login_timeout(5).unwrap();
+        conn.set_timeout(5).unwrap();
+        conn.connect(&format!("{}:2025", SERVER)).unwrap();
+
+        let mut rs = conn.execute("select db_name()", &[]).unwrap();
+        assert!(rs.next());
+        assert_eq!(Some(String::from("sybsystemprocs")), rs.get_string(0).unwrap());
+    }
+
+    #[test]
+    fn test_db_name() {
+        let mut conn = Connection::new();
+        conn.set_client_charset("UTF-8").unwrap();
+        conn.set_username("sa").unwrap();
+        conn.set_password("").unwrap();
+        conn.set_database("master").unwrap();
+        conn.set_tds_version_50().unwrap();
+        conn.set_login_timeout(5).unwrap();
+        conn.set_timeout(5).unwrap();
+        conn.connect(&format!("{}:2025", SERVER)).unwrap();
+
+        assert_eq!(String::from("master"), conn.db_name().unwrap());
+        conn.execute("use sybsystemprocs", &[]).unwrap();
+
+        assert_eq!(String::from("sybsystemprocs"), conn.db_name().unwrap());
+    }
+
 }
 

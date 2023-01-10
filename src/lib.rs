@@ -19,6 +19,7 @@ use to_sql::ToSql;
 pub type Result<T, E = error::Error> = core::result::Result<T, E>;
 pub use param_value::ParamValue;
 pub use statement::Statement;
+pub use rust_decimal::Decimal;
 
 #[derive(PartialEq, Debug, Clone)]
 pub(crate) enum TextPiece {
@@ -34,15 +35,16 @@ pub(crate) struct ParsedQuery {
 
 impl ParsedQuery {
     
-    pub(crate) fn param_index(&self, name: &str) -> Option<usize> {
+    pub(crate) fn param_index(&self, name: &str) -> Vec<usize> {
+        let mut result = Vec::new();
         for (i, n) in self.params.iter().enumerate() {
             if let Some(n) = n {
                 if n == name {
-                    return Some(i);
+                    result.push(i);
                 }
             }
         }
-        None
+        result
     }
 
 }

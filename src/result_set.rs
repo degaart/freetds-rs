@@ -1,6 +1,7 @@
 use std::{mem, rc::Rc, ops::Deref};
 use chrono::{NaiveDate, NaiveTime, NaiveDateTime};
 use freetds_sys::*;
+use rust_decimal::Decimal;
 use crate::{Connection, Error, Result, column_id::ColumnId, ParamValue};
 
 #[derive(Debug, Default, Clone)]
@@ -145,7 +146,7 @@ impl ResultSet {
                         break;
                     }
                 }
-                column_index.expect("Invalid column name")
+                column_index.expect(&format!("Invalid column name: {}", s))
             }
         };
 
@@ -202,12 +203,12 @@ impl ResultSet {
             return Err(Error::from_message("Invalid state"));
         }
 
-        let pos = self.results[pos].pos.unwrap();
-        if pos >= self.results[pos].rows.len() {
+        let row_pos = self.results[pos].pos.unwrap();
+        if row_pos >= self.results[pos].rows.len() {
             return Err(Error::from_message("Invalid state"));
         }
 
-        let row = &self.results[pos].rows[pos];
+        let row = &self.results[pos].rows[row_pos];
         let col: ColumnId = col.into();
         let col: usize = match col {
             ColumnId::I32(i) => i.try_into().expect("Invalid column index"),
@@ -240,11 +241,12 @@ impl ResultSet {
                     CS_BINARY_TYPE | CS_IMAGE_TYPE => {
                         Ok(Some(ParamValue::Blob(Rc::clone(&buffer).deref().clone())))
                     },
-                    CS_CHAR_TYPE | CS_TEXT_TYPE | CS_MONEY_TYPE | CS_MONEY4_TYPE | CS_DECIMAL_TYPE => {
+                    CS_CHAR_TYPE | CS_TEXT_TYPE => {
                         Ok(Some(ParamValue::String(String::from_utf8_lossy(&buffer).to_string())))
                     },
                     CS_UNICHAR_TYPE => {
                         let mut dstfmt: CS_DATAFMT = Default::default();
+                        dstfmt.datatype = CS_CHAR_TYPE;
                         dstfmt.maxlength = buffer.len() as i32;
                         dstfmt.format = CS_FMT_UNUSED as i32;
                         dstfmt.count = 1;
@@ -258,7 +260,7 @@ impl ResultSet {
                         let daterec = self.convert_date(&column.fmt, &buffer)?;
                         Ok(Some(match datatype {
                             CS_DATE_TYPE => {
-                                ParamValue::NaiveDate(
+                                ParamValue::Date(
                                     NaiveDate::from_ymd_opt(
                                         daterec.dateyear,
                                         (daterec.datemonth + 1) as u32,
@@ -268,7 +270,7 @@ impl ResultSet {
                                 )
                             },
                             CS_TIME_TYPE => {
-                                ParamValue::NaiveTime(
+                                ParamValue::Time(
                                     NaiveTime::from_hms_milli_opt(
                                         daterec.datehour as u32,
                                         daterec.dateminute as u32,
@@ -279,7 +281,7 @@ impl ResultSet {
                                 )
                             },
                             CS_DATETIME_TYPE | CS_DATETIME4_TYPE => {
-                                ParamValue::NaiveDateTime(
+                                ParamValue::DateTime(
                                     NaiveDate::from_ymd_opt(
                                         daterec.dateyear,
                                         (daterec.datemonth + 1) as u32,
@@ -323,7 +325,7 @@ impl ResultSet {
                             Ok(Some(ParamValue::I32(*ptr)))
                         }
                     },
-                    CS_NUMERIC_TYPE => {
+                    CS_MONEY_TYPE | CS_MONEY4_TYPE | CS_DECIMAL_TYPE | CS_NUMERIC_TYPE => {
                         if column.fmt.precision == CS_DEF_PREC && column.fmt.scale == 0 {
                             let mut dstfmt: CS_DATAFMT = Default::default();
                             dstfmt.datatype = CS_BIGINT_TYPE;
@@ -338,29 +340,36 @@ impl ResultSet {
                                 &mut dstdata)?;
                             assert_eq!(dstlen, mem::size_of::<i64>());
                             unsafe {
-                                Ok(Some(ParamValue::I64(mem::transmute(buffer.as_ptr()))))
+                                let ptr: *const i64 = mem::transmute(dstdata.as_ptr());
+                                Ok(Some(ParamValue::I64(*ptr)))
                             }
                         } else {
                             let mut dstfmt: CS_DATAFMT = Default::default();
-                            dstfmt.maxlength = buffer.len() as i32;
+                            dstfmt.datatype = CS_CHAR_TYPE;
+                            dstfmt.maxlength = 1024;
                             dstfmt.format = CS_FMT_UNUSED as i32;
+                            dstfmt.precision = CS_SRC_VALUE;
+                            dstfmt.scale = CS_SRC_VALUE;
                             dstfmt.count = 1;
 
                             let mut dstdata: Vec<u8> = vec![0u8; dstfmt.maxlength as usize];
                             let dstlen = self.conn.convert(&column.fmt, &buffer, &dstfmt, &mut dstdata)?;
-                            Ok(Some(ParamValue::String(String::from_utf8_lossy(&dstdata.as_slice()[0..dstlen]).to_string())))
+                            let s = String::from_utf8_lossy(&dstdata.as_slice()[0..dstlen]).to_string();
+                            Ok(Some(ParamValue::Decimal(Decimal::from_str_exact(&s).map_err(|_| Error::new(None, None, "Invalid decimal"))?)))
                         }
                     },
                     CS_REAL_TYPE  => {
                         unsafe {
                             assert_eq!(buffer.len(), mem::size_of::<f32>());
-                            Ok(Some(ParamValue::F64(mem::transmute(buffer.as_ptr()))))
+                            let ptr: *const f32 = mem::transmute(buffer.as_ptr());
+                            Ok(Some(ParamValue::F64(Into::<f64>::into(*ptr))))
                         }
                     },
                     CS_FLOAT_TYPE => {
                         unsafe {
                             assert_eq!(buffer.len(), mem::size_of::<f64>());
-                            Ok(Some(ParamValue::F64(mem::transmute(buffer.as_ptr()))))
+                            let ptr: *const f64 = mem::transmute(buffer.as_ptr());
+                            Ok(Some(ParamValue::F64(*ptr)))
                         }
                     },
                     _ => {
@@ -557,6 +566,35 @@ impl ResultSet {
                         let dstlen = self.conn.convert(&fmt, &buffer, &dstfmt, &mut dstdata)?;
                         dstdata.resize(dstlen, Default::default());
                         Ok(Some(dstdata))
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn get_decimal(&mut self, col: impl Into<ColumnId>) -> Result<Option<Decimal>> {
+        match self.get_buffer(col)? {
+            None => Ok(None),
+            Some((fmt, buffer)) => {
+                match fmt.datatype {
+                    CS_INT_TYPE | CS_BIT_TYPE | CS_TINYINT_TYPE | CS_SMALLINT_TYPE |
+                    CS_NUMERIC_TYPE | CS_MONEY_TYPE | CS_MONEY4_TYPE | CS_DECIMAL_TYPE |
+                    CS_REAL_TYPE | CS_FLOAT_TYPE => {
+                        let mut dstfmt: CS_DATAFMT = Default::default();
+                        dstfmt.datatype = CS_CHAR_TYPE;
+                        dstfmt.maxlength = 1024;
+                        dstfmt.format = CS_FMT_UNUSED as i32;
+                        dstfmt.precision = CS_SRC_VALUE;
+                        dstfmt.scale = CS_SRC_VALUE;
+                        dstfmt.count = 1;
+
+                        let mut dstdata: Vec<u8> = vec![0u8; dstfmt.maxlength as usize];
+                        let dstlen = self.conn.convert(&fmt, &buffer, &dstfmt, &mut dstdata)?;
+                        let s = String::from_utf8_lossy(&dstdata.as_slice()[0..dstlen]).to_string();
+                        Ok(Some(Decimal::from_str_exact(&s).map_err(|_| Error::new(None, None, "Invalid decimal"))?))
+                    },
+                    _ => {
+                        Err(Error::new(None, None, "Unsupported datatype"))
                     }
                 }
             }

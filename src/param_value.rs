@@ -1,4 +1,5 @@
 use chrono::{NaiveDate, NaiveTime, NaiveDateTime};
+use rust_decimal::Decimal;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum ParamValue {
@@ -7,10 +8,20 @@ pub enum ParamValue {
     I32(i32),
     I64(i64),
     F64(f64),
-    NaiveDate(NaiveDate),
-    NaiveTime(NaiveTime),
-    NaiveDateTime(NaiveDateTime),
+    Decimal(Decimal),
+    Date(NaiveDate),
+    Time(NaiveTime),
+    DateTime(NaiveDateTime),
     Blob(Vec<u8>),
+}
+
+impl<T> From<&T> for ParamValue
+where
+    T: Into<ParamValue> + Clone
+{
+    fn from(v: &T) -> Self {
+        v.clone().into()
+    }
 }
 
 impl<T> From<Option<T>> for ParamValue
@@ -34,6 +45,12 @@ impl From<&str> for ParamValue {
 impl From<String> for ParamValue {
     fn from(v: String) -> Self {
         Self::String(v)
+    }
+}
+
+impl From<bool> for ParamValue {
+    fn from(v: bool) -> Self {
+        if v { Self::I32(1) } else { Self::I32(0) }
     }
 }
 
@@ -61,21 +78,27 @@ impl From<f64> for ParamValue {
     }
 }
 
+impl From<Decimal> for ParamValue {
+    fn from(v: Decimal) -> Self {
+        Self::Decimal(v)
+    }
+}
+
 impl From<NaiveDate> for ParamValue {
     fn from(v: NaiveDate) -> Self {
-        Self::NaiveDate(v)
+        Self::Date(v)
     }
 }
 
 impl From<NaiveTime> for ParamValue {
     fn from(v: NaiveTime) -> Self {
-        Self::NaiveTime(v)
+        Self::Time(v)
     }
 }
 
 impl From<NaiveDateTime> for ParamValue {
     fn from(v: NaiveDateTime) -> Self {
-        Self::NaiveDateTime(v)
+        Self::DateTime(v)
     }
 }
 

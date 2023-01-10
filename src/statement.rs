@@ -21,34 +21,37 @@ impl Statement {
         }
     }
 
-    pub fn set_param(&mut self, id: impl Into<ColumnId>, value: impl Into<ParamValue>) {
-        let idx: usize = match id.into() {
+    pub fn set_param(&mut self, id: impl Into<ColumnId>, value: impl Into<ParamValue> + Clone) {
+        match id.into() {
             ColumnId::I32(i) => {
-                let i: usize = i.try_into().expect("Invalid column index");
+                let i: usize = i.try_into().expect(&format!("Invalid column index: {}", i));
                 if i >= self.query.params.len() {
                     panic!("Invalid column index");
                 }
-                i
+                self.params[i] = Some(value.into());
             },
             ColumnId::String(s) => {
-                match self.query.param_index(&s) {
-                    None => panic!("Invalid param name"),
-                    Some(idx) => idx
+                let indexes = self.query.param_index(&s);
+                for i in indexes {
+                    self.params[i] = Some(value.clone().into());
                 }
             }
         };
-        self.params[idx] = Some(value.into());
     }
 
     pub fn text(&self) -> &str {
         &self.text
     }
 
+    pub fn param_count(&self) -> usize {
+        self.params.len()
+    }
+
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::{Statement, ParamValue};
+    use crate::{Statement, ParamValue, to_sql::ToSql, null::Null, generate_query};
 
     #[test]
     fn test_set_param() {
@@ -66,7 +69,32 @@ mod tests {
         assert_eq!(st.params[2], Some(ParamValue::I32(42)));
         assert_eq!(st.params[3], Some(ParamValue::F64(42.0)));
         assert_eq!(st.params[4], Some(ParamValue::Blob(vec![b'a', b'r', b'f'])));
+    }
 
+    #[test]
+    fn test_double_param() {
+        let mut st = Statement::new(
+            ":owner, :name, :name");
+        st.set_param("owner", "DIO");
+        st.set_param("name", "ZA WARUDO");
+        assert_eq!(st.params[0], Some(ParamValue::String(String::from("DIO"))));
+        assert_eq!(st.params[1], Some(ParamValue::String(String::from("ZA WARUDO"))));
+
+        let params: Vec<&dyn ToSql> = st.params.iter()
+            .map(|param| {
+                match param {
+                    None => &Null {} as &dyn ToSql,
+                    Some(param) => param as &dyn ToSql
+                }
+            })
+            .collect();
+        let text = generate_query(
+            &st.query,
+            params.iter().map(|p| *p)
+        );
+
+        let expected = "'DIO', 'ZA WARUDO', 'ZA WARUDO'";
+        assert_eq!(expected, text);
 
     }
 

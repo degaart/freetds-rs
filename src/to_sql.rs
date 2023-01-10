@@ -1,4 +1,5 @@
 use chrono::{NaiveDateTime, NaiveDate, NaiveTime};
+use rust_decimal::Decimal;
 use crate::{null::Null, ParamValue};
 
 pub trait ToSql {
@@ -56,6 +57,12 @@ impl ToSql for i64 {
 impl ToSql for f64 {
     fn to_sql(&self) -> String {
         return format!("{}", self);
+    }
+}
+
+impl ToSql for Decimal {
+    fn to_sql(&self) -> String {
+        return format!("{}", self.to_string());
     }
 }
 
@@ -123,9 +130,10 @@ impl ToSql for ParamValue {
             ParamValue::I32(i) => i.to_sql(),
             ParamValue::I64(i) => i.to_sql(),
             ParamValue::F64(f) => f.to_sql(),
-            ParamValue::NaiveDate(d) => d.to_sql(),
-            ParamValue::NaiveTime(t) => t.to_sql(),
-            ParamValue::NaiveDateTime(dt) => dt.to_sql(),
+            ParamValue::Decimal(d) => d.to_sql(),
+            ParamValue::Date(d) => d.to_sql(),
+            ParamValue::Time(t) => t.to_sql(),
+            ParamValue::DateTime(dt) => dt.to_sql(),
             ParamValue::Blob(b) => b.to_sql(),
         }
     }
