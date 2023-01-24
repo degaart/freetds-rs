@@ -1,7 +1,12 @@
-use std::ffi::CStr;
+#![allow(unused)]
+
+use std::collections::HashMap;
+use std::ffi::{CStr, c_void};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::{ptr, mem, ffi::CString};
+use log::debug;
+use once_cell::sync::OnceCell;
 use freetds_sys::*;
 use crate::command::CommandArg;
 use crate::null::Null;
@@ -9,7 +14,96 @@ use crate::{error, parse_query, generate_query, Statement};
 use crate::result_set::{ResultSet, Rows, Column, Row};
 use crate::{property::Property, Result, error::Error, command::Command};
 use crate::to_sql::ToSql;
-use log::debug;
+
+/* TODO: Investigate using cs_config(CS_USERDATA) and a Pin<Mutex<T>> */
+struct Diagnostics {
+    handlers: Mutex<HashMap<usize,Box<dyn Fn(Error) + Send>>>
+}
+
+impl Diagnostics {
+    fn new() -> Self {
+        Diagnostics {
+            handlers: Mutex::new(HashMap::new())
+        }
+    }
+
+    fn set_handler(ctx: *const CS_CONTEXT, handler: Box<dyn Fn(Error) + Send>) {
+        DIAGNOSTICS
+            .get_or_init(|| Diagnostics::new())
+            .handlers
+            .lock()
+            .unwrap()
+            .insert(ctx as usize, handler);
+    }
+}
+
+static DIAGNOSTICS: OnceCell<Diagnostics> = OnceCell::new();
+
+extern "C" fn csmsg_callback(ctx: *const CS_CONTEXT, msg: *const CS_CLIENTMSG) -> CS_RETCODE {
+    let key = ctx as usize;
+    let handlers = DIAGNOSTICS
+        .get_or_init(|| Diagnostics::new())
+        .handlers
+        .lock()
+        .unwrap();
+
+    let handler = handlers.get(&key)
+        .expect("context not found in Diagnostics::handlers");
+
+    unsafe {
+        handler(Error::new(
+                Some(error::Type::Cs),
+                Some((*msg).msgnumber),
+                CStr::from_ptr((*msg).msgstring.as_ptr()).to_string_lossy().trim_end()));
+    }
+    CS_SUCCEED
+}
+
+extern "C" fn clientmsg_callback(
+    ctx: *const CS_CONTEXT,
+    _conn: *const CS_CONNECTION,
+    msg: *const CS_CLIENTMSG
+) -> CS_RETCODE {
+    let key = ctx as usize;
+    let handlers = DIAGNOSTICS
+        .get_or_init(|| Diagnostics::new())
+        .handlers
+        .lock()
+        .unwrap();
+
+    let handler = handlers.get(&key)
+        .expect("context not found in Diagnostics::handlers");
+    unsafe {
+        handler(Error::new(
+                Some(error::Type::Client),
+                Some((*msg).msgnumber),
+                CStr::from_ptr((*msg).msgstring.as_ptr()).to_string_lossy().trim_end()));
+    }
+    CS_SUCCEED
+}
+
+extern "C" fn servermsg_callback(
+    ctx: *const CS_CONTEXT,
+    _conn: *const CS_CONNECTION,
+    msg: *const CS_SERVERMSG
+) -> CS_RETCODE {
+    let key = ctx as usize;
+    let handlers = DIAGNOSTICS
+        .get_or_init(|| Diagnostics::new())
+        .handlers
+        .lock()
+        .unwrap();
+
+    let handler = handlers.get(&key)
+        .expect("context not found in Diagnostics::handlers");
+    unsafe {
+        handler(Error::new(
+                Some(error::Type::Server),
+                Some((*msg).msgnumber),
+                CStr::from_ptr(mem::transmute((*msg).text.as_ptr())).to_string_lossy().trim_end()));
+    }
+    CS_SUCCEED
+}
 
 #[derive(Debug, Clone, Default)]
 struct Bind {
@@ -21,6 +115,7 @@ struct Bind {
 pub(crate) struct CSConnection {
     pub ctx_handle: *mut CS_CONTEXT,
     pub conn_handle: *mut CS_CONNECTION,
+    pub messages: Arc<Mutex<Vec<Error>>>,
 }
 
 impl CSConnection {
@@ -28,22 +123,54 @@ impl CSConnection {
         unsafe {
             let mut ctx_handle: *mut CS_CONTEXT = ptr::null_mut();
             let ret = cs_ctx_alloc(CS_VERSION_125, &mut ctx_handle);
-            if ret != CS_SUCCEED {
-                panic!("cs_ctx_alloc failed");
-            }
+            assert_eq!(CS_SUCCEED, ret);
+
+            let messages = Arc::new(Mutex::new(Vec::new()));
+
+            let diag_messages = Arc::clone(&messages);
+            Diagnostics::set_handler(ctx_handle, Box::new(move |msg| {
+                diag_messages
+                    .lock()
+                    .unwrap()
+                    .push(msg);
+            }));
+
+            let ret = cs_config(ctx_handle,
+                CS_SET,
+                CS_MESSAGE_CB,
+                csmsg_callback as *mut c_void,
+                mem::size_of_val(&csmsg_callback) as i32,
+                ptr::null_mut());
+            assert_eq!(CS_SUCCEED, ret);
 
             let ret = ct_init(ctx_handle, CS_VERSION_125);
-            if ret != CS_SUCCEED {
-                panic!("ct_init failed");
-            }
+            assert_eq!(CS_SUCCEED, ret);
 
             let mut conn_handle: *mut CS_CONNECTION = ptr::null_mut();
             let ret = ct_con_alloc(ctx_handle, &mut conn_handle);
-            if ret != CS_SUCCEED {
-                panic!("ct_con_alloc failed");
-            }
+            assert_eq!(CS_SUCCEED, ret);
 
-            Self { ctx_handle, conn_handle }
+            let ret = ct_callback(
+                ctx_handle, 
+                conn_handle, 
+                CS_SET, 
+                CS_CLIENTMSG_CB, 
+                clientmsg_callback as *mut c_void);
+            assert_eq!(CS_SUCCEED, ret);
+
+            let ret = ct_callback(
+                ctx_handle,
+                conn_handle,
+                CS_SET,
+                CS_SERVERMSG_CB,
+                servermsg_callback as *mut c_void);
+            assert_eq!(CS_SUCCEED, ret);
+
+            Self {
+                ctx_handle,
+                conn_handle,
+                messages
+            }
         }
     }   
 }
@@ -79,7 +206,6 @@ impl Connection {
     pub fn new() -> Self {
         let conn = Arc::new(Mutex::new(CSConnection::new()));
         let conn_guard = conn.lock().unwrap();
-        Self::diag_init(conn_guard.ctx_handle, conn_guard.conn_handle);
         drop(conn_guard);
         Self {
             conn,
@@ -458,92 +584,24 @@ impl Connection {
         Ok(Rows::new(columns, rows))
     }
 
-    fn diag_init(ctx: *mut CS_CONTEXT, conn: *mut CS_CONNECTION) {
-        unsafe {
-            let ret = cs_diag(ctx, CS_INIT, CS_UNUSED, CS_UNUSED, ptr::null_mut());
-            assert_eq!(CS_SUCCEED, ret);
-
-            let ret = ct_diag(conn, CS_INIT, CS_UNUSED, CS_UNUSED, ptr::null_mut());
-            assert_eq!(CS_SUCCEED, ret);
-        }
-    }
-
     pub fn diag_clear(&mut self) {
-        unsafe {
-            let ret = cs_diag(
-                self.conn.lock().unwrap().ctx_handle,
-                CS_CLEAR,
-                CS_CLIENTMSG_TYPE,
-                CS_UNUSED,
-                ptr::null_mut());
-            assert_eq!(CS_SUCCEED, ret);
-
-            let ret = ct_diag(
-                self.conn.lock().unwrap().conn_handle,
-                CS_CLEAR,
-                CS_ALLMSG_TYPE,
-                CS_UNUSED,
-                ptr::null_mut());
-            assert_eq!(CS_SUCCEED, ret);
-        }
+        self.conn
+            .lock()
+            .unwrap()
+            .messages
+            .lock()
+            .unwrap()
+            .clear();
     }
 
     fn diag_get(&mut self) -> Vec<Error> {
-        let mut result = Vec::new();
-        let conn = self.conn.lock().unwrap();
-        unsafe {
-            /* CS messages */
-            let count: i32 = Default::default();
-            let ret = cs_diag(conn.ctx_handle, CS_STATUS, CS_UNUSED, CS_UNUSED, mem::transmute(&count));
-            assert_eq!(CS_SUCCEED, ret);
-            
-            for i in 0..count {
-                let mut buffer: CS_CLIENTMSG = Default::default();
-                let ret = cs_diag(conn.ctx_handle, CS_GET, CS_CLIENTMSG_TYPE, i + 1, mem::transmute(&mut buffer));
-                if ret != CS_SUCCEED {
-                    assert_eq!(CS_SUCCEED, ret);
-                }
-
-                result.push(Error::new(
-                    Some(error::Type::Cs),
-                    Some(buffer.msgnumber),
-                    CStr::from_ptr(buffer.msgstring.as_ptr()).to_string_lossy().trim_end()))
-            }
-
-            /* Client messages */
-            let count: i32 = Default::default();
-            let ret = ct_diag(conn.conn_handle, CS_STATUS, CS_CLIENTMSG_TYPE, CS_UNUSED, mem::transmute(&count));
-            assert_eq!(CS_SUCCEED, ret);
-
-            for i in 0..count {
-                let buffer: CS_CLIENTMSG = Default::default();
-                let ret = ct_diag(conn.conn_handle, CS_GET, CS_CLIENTMSG_TYPE, i + 1, mem::transmute(&buffer));
-                assert_eq!(CS_SUCCEED, ret);
-
-                let msgnumber = buffer.msgnumber as i32;
-                result.push(Error::new(
-                    Some(error::Type::Client),
-                    Some(msgnumber),
-                    CStr::from_ptr(mem::transmute(buffer.msgstring.as_ptr())).to_string_lossy().trim_end()));
-            }
-
-            /* server messages */
-            let ret = ct_diag(conn.conn_handle, CS_STATUS, CS_SERVERMSG_TYPE, CS_UNUSED, mem::transmute(&count));
-            assert_eq!(CS_SUCCEED, ret);
-
-            for i in 0..count {
-                let buffer: CS_SERVERMSG = Default::default();
-                let ret = ct_diag(conn.conn_handle, CS_GET, CS_SERVERMSG_TYPE, i + 1, mem::transmute(&buffer));
-                assert_eq!(CS_SUCCEED, ret);
-
-                let msgnumber = buffer.msgnumber as i32;
-                result.push(Error::new(
-                    Some(error::Type::Server),
-                    Some(msgnumber),
-                    CStr::from_ptr(mem::transmute(buffer.text.as_ptr())).to_string_lossy().trim_end()));
-            }
-        }
-        result
+        self.conn
+            .lock()
+            .unwrap()
+            .messages
+            .lock()
+            .unwrap()
+            .clone()
     }
 
     pub fn get_error(&mut self) -> Option<Error> {
