@@ -756,7 +756,6 @@ mod tests {
     use chrono::{NaiveDate, NaiveTime};
     use rust_decimal::Decimal;
     use std::cell::RefCell;
-    use std::rc::Rc;
     use std::sync::{Arc, Mutex};
     use std::thread;
     use std::time::Duration;
