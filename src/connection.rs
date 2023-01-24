@@ -35,6 +35,15 @@ impl Diagnostics {
             .unwrap()
             .insert(ctx as usize, handler);
     }
+
+    fn remove_handler(ctx: *const CS_CONTEXT) {
+        if let Some(diag) = DIAGNOSTICS.get() {
+            diag.handlers
+                .lock()
+                .unwrap()
+                .remove(&(ctx as usize));
+        }
+    }
 }
 
 static DIAGNOSTICS: OnceCell<Diagnostics> = OnceCell::new();
@@ -116,6 +125,7 @@ pub(crate) struct CSConnection {
     pub ctx_handle: *mut CS_CONTEXT,
     pub conn_handle: *mut CS_CONNECTION,
     pub messages: Arc<Mutex<Vec<Error>>>,
+    pub msg_callback: Arc<Mutex<Option<Box<dyn Fn(&Error) + Send>>>>,
 }
 
 impl CSConnection {
@@ -126,9 +136,16 @@ impl CSConnection {
             assert_eq!(CS_SUCCEED, ret);
 
             let messages = Arc::new(Mutex::new(Vec::new()));
+            let msg_callback = Arc::new(Mutex::new(None::<Box<dyn Fn(&Error) + Send>>));
 
             let diag_messages = Arc::clone(&messages);
+            let diag_callback = Arc::clone(&msg_callback);
             Diagnostics::set_handler(ctx_handle, Box::new(move |msg| {
+                let callback = diag_callback.lock().unwrap();
+                if let Some(f) = callback.as_ref() {
+                    f(&msg);
+                }
+
                 diag_messages
                     .lock()
                     .unwrap()
@@ -169,15 +186,20 @@ impl CSConnection {
             Self {
                 ctx_handle,
                 conn_handle,
-                messages
+                messages,
+                msg_callback,
             }
         }
     }   
+
 }
+
 
 impl Drop for CSConnection {
     fn drop(&mut self) {
         unsafe {
+            Diagnostics::remove_handler(self.ctx_handle);
+
             let ret = ct_con_drop(self.conn_handle);
             if ret != CS_SUCCEED {
                 panic!("ct_con_drop failed");
@@ -606,18 +628,9 @@ impl Connection {
 
     pub fn get_error(&mut self) -> Option<Error> {
         let errors = self.diag_get();
-        if errors.is_empty() {
-            None
-        } else {
-            let err = errors.iter()
-                .find(|e| {
-                    match e.code() {
-                        None => true,
-                        Some(code) => code != 5701 && code != 5704
-                    }
-                });
-            err.cloned()
-        }
+        errors.iter()
+            .nth(0)
+            .map(|e| e.clone())
     }
 
     pub fn is_connected(&mut self) -> bool {
@@ -707,12 +720,27 @@ impl Connection {
         }
     }
 
+    pub fn set_message_callback(&mut self, callback: Box<dyn Fn(&Error) + Send>) {
+        *self.conn
+            .lock().unwrap()
+            .msg_callback.lock().unwrap() = Some(callback);
+    }
+
+    pub fn clear_message_callback(&mut self) {
+        *self.conn
+            .lock().unwrap()
+            .msg_callback.lock().unwrap() = None;
+    }
+
 }
 
 unsafe impl Send for Connection {}
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    use std::sync::{Arc, Mutex};
     use std::thread;
     use std::time::Duration;
     use chrono::{NaiveDate, NaiveTime};
@@ -1039,6 +1067,33 @@ mod tests {
         conn.execute("use sybsystemprocs", &[]).unwrap();
 
         assert_eq!(String::from("sybsystemprocs"), conn.db_name().unwrap());
+    }
+
+    #[test]
+    fn test_message_callback() {
+        let mut conn = connect();
+
+        let msg = Arc::new(Mutex::new(RefCell::new(None::<String>)));
+        let msg2 = Arc::clone(&msg);
+        conn.set_message_callback(Box::new(move |e| {
+            *msg2.lock().unwrap().borrow_mut() = Some(e.desc().to_string());
+        }));
+        let text = 
+            "selecta \
+                'aaaa', \
+                2, 5000000000, \
+                3.14, \
+                cast('1986/07/05 10:30:31.1' as datetime), \
+                cast(3.14 as numeric(18,2)), \
+                cast(0xDEADBEEF as image), \
+                cast('ccc' as text), \
+                null";
+        let ret = conn.execute(text, &[]);
+        assert!(ret.is_err());
+        assert_eq!("Incorrect syntax near '('.", ret.err().unwrap().desc());
+
+        assert!(msg.lock().unwrap().borrow().is_some());
+        assert_eq!("Incorrect syntax near '('.", msg.lock().unwrap().borrow().as_ref().unwrap());
     }
 
 }
