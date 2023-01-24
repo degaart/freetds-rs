@@ -1,6 +1,6 @@
-use chrono::{NaiveDateTime, NaiveDate, NaiveTime};
-use rust_decimal::Decimal;
 use crate::{null::Null, ParamValue};
+use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
+use rust_decimal::Decimal;
 
 pub trait ToSql {
     fn to_sql(&self) -> String;
@@ -108,16 +108,12 @@ impl ToSql for &[u8] {
 
 impl<T> ToSql for Option<T>
 where
-    T: ToSql
+    T: ToSql,
 {
     fn to_sql(&self) -> String {
         match self {
-            Some(value) => {
-                value.to_sql()
-            },
-            None => {
-                "null".to_string()
-            },
+            Some(value) => value.to_sql(),
+            None => "null".to_string(),
         }
     }
 }

@@ -1,17 +1,17 @@
 #![allow(clippy::useless_transmute)]
 
+use crate::connection::{CSConnection, Connection};
+use crate::error::Error;
+use crate::Result;
+use freetds_sys::*;
 use std::ffi::CString;
 use std::mem;
 use std::ptr;
 use std::sync::Arc;
 use std::sync::Mutex;
-use freetds_sys::*;
-use crate::connection::{CSConnection, Connection};
-use crate::Result;
-use crate::error::Error;
 
 pub(crate) struct CSCommand {
-    handle: *mut CS_COMMAND
+    handle: *mut CS_COMMAND,
 }
 
 impl CSCommand {
@@ -22,9 +22,7 @@ impl CSCommand {
             if ret != CS_SUCCEED {
                 panic!("ct_cmd_alloc failed");
             }
-            Self {
-                handle: cmd
-            }
+            Self { handle: cmd }
         }
     }
 }
@@ -41,13 +39,13 @@ impl Drop for CSCommand {
 }
 
 pub enum CommandArg<'a> {
-    String(&'a str)
+    String(&'a str),
 }
 
 #[derive(Clone)]
 pub(crate) struct Command {
     pub conn: Connection,
-    pub cmd: Arc<Mutex<CSCommand>>
+    pub cmd: Arc<Mutex<CSCommand>>,
 }
 
 impl Command {
@@ -72,10 +70,14 @@ impl Command {
                             cmd_type,
                             mem::transmute(buffer.as_ptr()),
                             CS_NULLTERM,
-                            option);
+                            option,
+                        );
                     }
                     if ret != CS_SUCCEED {
-                        return Err(self.conn.get_error().unwrap_or_else(|| Error::from_message("ct_command failed")));
+                        return Err(self
+                            .conn
+                            .get_error()
+                            .unwrap_or_else(|| Error::from_message("ct_command failed")));
                     }
                 }
             }
@@ -93,12 +95,14 @@ impl Command {
         if ret == CS_SUCCEED {
             Ok(())
         } else {
-            Err(self.conn.get_error().unwrap_or_else(|| Error::from_message("ct_send failed")))
+            Err(self
+                .conn
+                .get_error()
+                .unwrap_or_else(|| Error::from_message("ct_send failed")))
         }
-    
     }
 
-    pub fn results(&mut self) -> Result<(bool,i32)> {
+    pub fn results(&mut self) -> Result<(bool, i32)> {
         self.conn.diag_clear();
         let mut result_type: i32 = Default::default();
         let ret;
@@ -107,13 +111,23 @@ impl Command {
             ret = ct_results(cmd.handle, &mut result_type);
         }
         if ret != CS_SUCCEED && ret != CS_END_RESULTS {
-            Err(self.conn.get_error().unwrap_or_else(|| Error::from_message("ct_results failed")))
+            Err(self
+                .conn
+                .get_error()
+                .unwrap_or_else(|| Error::from_message("ct_results failed")))
         } else {
             Ok((ret == CS_SUCCEED, result_type))
         }
     }
 
-    pub unsafe fn bind_unsafe(&mut self, item: i32, datafmt: *mut CS_DATAFMT, buffer: *mut CS_VOID, data_length: *mut i32, indicator: *mut i16) -> Result<()> {
+    pub unsafe fn bind_unsafe(
+        &mut self,
+        item: i32,
+        datafmt: *mut CS_DATAFMT,
+        buffer: *mut CS_VOID,
+        data_length: *mut i32,
+        indicator: *mut i16,
+    ) -> Result<()> {
         self.conn.diag_clear();
         let ret;
         {
@@ -123,7 +137,10 @@ impl Command {
         if ret == CS_SUCCEED {
             Ok(())
         } else {
-            Err(self.conn.get_error().unwrap_or_else(|| Error::from_message("ct_bind failed")))
+            Err(self
+                .conn
+                .get_error()
+                .unwrap_or_else(|| Error::from_message("ct_bind failed")))
         }
     }
 
@@ -140,7 +157,10 @@ impl Command {
         } else if ret == CS_END_DATA {
             Ok(false)
         } else {
-            Err(self.conn.get_error().unwrap_or_else(|| Error::from_message("ct_fetch failed")))
+            Err(self
+                .conn
+                .get_error()
+                .unwrap_or_else(|| Error::from_message("ct_fetch failed")))
         }
     }
 
@@ -157,12 +177,16 @@ impl Command {
                 type_,
                 mem::transmute(&mut buf),
                 mem::size_of::<T>() as i32,
-                &mut out_len);
+                &mut out_len,
+            );
         }
         if ret == CS_SUCCEED {
             Ok(buf)
         } else {
-            Err(self.conn.get_error().unwrap_or_else(|| Error::from_message("ct_res_info failed")))
+            Err(self
+                .conn
+                .get_error()
+                .unwrap_or_else(|| Error::from_message("ct_res_info failed")))
         }
     }
 
@@ -178,7 +202,10 @@ impl Command {
         if ret == CS_SUCCEED {
             Ok(buf)
         } else {
-            Err(self.conn.get_error().unwrap_or_else(|| Error::from_message("ct_describe failed")))
+            Err(self
+                .conn
+                .get_error()
+                .unwrap_or_else(|| Error::from_message("ct_describe failed")))
         }
     }
 
@@ -191,19 +218,18 @@ impl Command {
         if ret == CS_SUCCEED {
             Ok(())
         } else {
-            Err(self.conn.get_error().unwrap_or_else(|| Error::from_message("ct_cancel failed")))
+            Err(self
+                .conn
+                .get_error()
+                .unwrap_or_else(|| Error::from_message("ct_cancel failed")))
         }
     }
-
 }
 
 unsafe impl Send for Command {}
 
 impl Drop for Command {
     fn drop(&mut self) {
-        self
-            .cancel(CS_CANCEL_ALL)
-            .expect("cs_cancel failed");
+        self.cancel(CS_CANCEL_ALL).expect("cs_cancel failed");
     }
 }
-

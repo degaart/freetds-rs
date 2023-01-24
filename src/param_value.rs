@@ -1,4 +1,4 @@
-use chrono::{NaiveDate, NaiveTime, NaiveDateTime};
+use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 use rust_decimal::Decimal;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -17,7 +17,7 @@ pub enum ParamValue {
 
 impl<T> From<&T> for ParamValue
 where
-    T: Into<ParamValue> + Clone
+    T: Into<ParamValue> + Clone,
 {
     fn from(v: &T) -> Self {
         v.clone().into()
@@ -26,12 +26,12 @@ where
 
 impl<T> From<Option<T>> for ParamValue
 where
-    T: Into<ParamValue>
+    T: Into<ParamValue>,
 {
     fn from(v: Option<T>) -> Self {
         match v {
             None => Self::Null,
-            Some(v) => v.into()
+            Some(v) => v.into(),
         }
     }
 }
@@ -50,7 +50,11 @@ impl From<String> for ParamValue {
 
 impl From<bool> for ParamValue {
     fn from(v: bool) -> Self {
-        if v { Self::I32(1) } else { Self::I32(0) }
+        if v {
+            Self::I32(1)
+        } else {
+            Self::I32(0)
+        }
     }
 }
 
@@ -125,4 +129,3 @@ impl From<&[i8]> for ParamValue {
         Self::Blob(v.iter().map(|c| *c as u8).collect())
     }
 }
-

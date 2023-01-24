@@ -5,7 +5,7 @@ pub enum Type {
     Cs,
     Client,
     Server,
-    Library
+    Library,
 }
 
 impl Default for Type {
@@ -23,7 +23,6 @@ pub struct Error {
 }
 
 impl Error {
-
     pub fn from_message(desc: impl AsRef<str>) -> Self {
         Self {
             type_: Default::default(),
@@ -57,16 +56,23 @@ impl Error {
     pub fn severity(&self) -> Option<i32> {
         self.severity
     }
-
 }
 
 impl Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self.type_ {
-            Type::Cs => { write!(f, "CS library error")?; },
-            Type::Client => { write!(f, "Client library error")?; },
-            Type::Server => { write!(f, "Server error")?; },
-            Type::Library => { write!(f, "FreeTDS error")?; }
+            Type::Cs => {
+                write!(f, "CS library error")?;
+            }
+            Type::Client => {
+                write!(f, "Client library error")?;
+            }
+            Type::Server => {
+                write!(f, "Server error")?;
+            }
+            Type::Library => {
+                write!(f, "FreeTDS error")?;
+            }
         };
 
         if let Some(code) = self.code {
@@ -81,9 +87,7 @@ impl Display for Error {
     }
 }
 
-impl std::error::Error for Error {
-
-}
+impl std::error::Error for Error {}
 
 impl From<Box<dyn std::error::Error>> for Error {
     fn from(e: Box<dyn std::error::Error>) -> Self {

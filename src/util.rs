@@ -44,18 +44,18 @@ pub fn type_name(type_: i32) -> Option<&'static str> {
         CS_BIGDATETIME_TYPE => Some("CS_BIGDATETIME_TYPE"),
         CS_BIGTIME_TYPE => Some("CS_BIGTIME_TYPE"),
         CS_UNIQUE_TYPE => Some("CS_UNIQUE_TYPE"),
-        _ => None        
+        _ => None,
     }
 }
 
 pub fn format_name(format: i32) -> Option<&'static str> {
-    match format as u32{
+    match format as u32 {
         CS_FMT_UNUSED => Some("CS_FMT_UNUSED"),
         CS_FMT_NULLTERM => Some("CS_FMT_NULLTERM"),
         CS_FMT_PADNULL => Some("CS_FMT_PADNULL"),
         CS_FMT_PADBLANK => Some("CS_FMT_PADBLANK"),
         CS_FMT_JUSTIFY_RT => Some("CS_FMT_JUSTIFY_RT"),
-        _ => None
+        _ => None,
     }
 }
 
@@ -79,6 +79,6 @@ pub fn return_name(ret: i32) -> Option<&'static str> {
         CS_END_ITEM => Some("CS_END_ITEM"),
         CS_NOMSG => Some("CS_NOMSG"),
         CS_TIMED_OUT => Some("CS_TIMED_OUT"),
-        _ => None
+        _ => None,
     }
 }
