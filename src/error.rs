@@ -1,4 +1,4 @@
-use std::fmt::Display;
+use std::{fmt::Display};
 
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
 pub enum Type {
@@ -8,31 +8,38 @@ pub enum Type {
     Library
 }
 
+impl Default for Type {
+    fn default() -> Self {
+        Self::Library
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Error {
-    type_: Type,
-    code: Option<i32>,
-    desc: String,
+    pub(crate) type_: Type,
+    pub(crate) code: Option<i32>,
+    pub(crate) desc: String,
+    pub(crate) severity: Option<i32>,
 }
 
 impl Error {
-    pub fn new(type_: Option<Type>, code: Option<i32>, desc: impl AsRef<str>) -> Self {
+
+    pub fn from_message(desc: impl AsRef<str>) -> Self {
         Self {
-            type_: match type_ {
-                None => Type::Library,
-                Some(type_) => type_
-            },
-            code: code,
-            desc: desc.as_ref().to_string()
+            type_: Default::default(),
+            code: None,
+            desc: desc.as_ref().to_string(),
+            severity: None,
         }
     }
 
-    pub fn from_message(desc: impl AsRef<str>) -> Self {
-        Self::new(None, None, desc)
-    }
-
     pub fn from_failure(fn_name: impl AsRef<str>) -> Self {
-        Self::new(None, None, &format!("{} failed", fn_name.as_ref()))
+        Self {
+            type_: Default::default(),
+            code: None,
+            desc: format!("{} failed", fn_name.as_ref()),
+            severity: None,
+        }
     }
 
     pub fn code(&self) -> Option<i32> {
@@ -45,6 +52,10 @@ impl Error {
 
     pub fn type_(&self) -> Type {
         self.type_
+    }
+
+    pub fn severity(&self) -> Option<i32> {
+        return self.severity;
     }
 
 }
@@ -60,6 +71,10 @@ impl Display for Error {
 
         if let Some(code) = self.code {
             write!(f, " #{:04}", code)?;
+        }
+
+        if let Some(severity) = self.severity {
+            write!(f, " severity {}", severity)?;
         }
 
         write!(f, ": {}", self.desc)

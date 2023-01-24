@@ -266,7 +266,7 @@ impl ResultSet {
                                         (daterec.datemonth + 1) as u32,
                                         daterec.datedmonth as u32
                                     )
-                                    .ok_or(Error::new(None, None, "Invalid date"))?
+                                    .ok_or(Error::from_message("Invalid date"))?
                                 )
                             },
                             CS_TIME_TYPE => {
@@ -277,7 +277,7 @@ impl ResultSet {
                                         daterec.datesecond as u32,
                                         daterec.datemsecond as u32
                                     )
-                                    .ok_or(Error::new(None, None, "Invalid time"))?
+                                    .ok_or(Error::from_message("Invalid time"))?
                                 )
                             },
                             CS_DATETIME_TYPE | CS_DATETIME4_TYPE => {
@@ -287,14 +287,14 @@ impl ResultSet {
                                         (daterec.datemonth + 1) as u32,
                                         daterec.datedmonth as u32
                                     )
-                                    .ok_or(Error::new(None, None, "Invalid date"))?
+                                    .ok_or(Error::from_message("Invalid date"))?
                                     .and_hms_milli_opt(
                                         daterec.datehour as u32,
                                         daterec.dateminute as u32,
                                         daterec.datesecond as u32,
                                         daterec.datemsecond as u32
                                     )
-                                    .ok_or(Error::new(None, None, "Invalid date"))?
+                                    .ok_or(Error::from_message("Invalid date"))?
                                 )
                             },
                             _ => panic!("Invalid code path")
@@ -355,7 +355,7 @@ impl ResultSet {
                             let mut dstdata: Vec<u8> = vec![0u8; dstfmt.maxlength as usize];
                             let dstlen = self.conn.convert(&column.fmt, &buffer, &dstfmt, &mut dstdata)?;
                             let s = String::from_utf8_lossy(&dstdata.as_slice()[0..dstlen]).to_string();
-                            Ok(Some(ParamValue::Decimal(Decimal::from_str_exact(&s).map_err(|_| Error::new(None, None, "Invalid decimal"))?)))
+                            Ok(Some(ParamValue::Decimal(Decimal::from_str_exact(&s).map_err(|_| Error::from_message("Invalid decimal"))?)))
                         }
                     },
                     CS_REAL_TYPE  => {
@@ -373,7 +373,7 @@ impl ResultSet {
                         }
                     },
                     _ => {
-                        Err(Error::new(None, None, "Unsupported datatype"))
+                        Err(Error::from_message("Unsupported datatype"))
                     }
                 }
             }
@@ -504,7 +504,7 @@ impl ResultSet {
                             dt.dateyear,
                             (dt.datemonth + 1) as u32,
                             dt.datedmonth as u32)
-                        .ok_or(Error::new(None, None, "Invalid date"))?
+                        .ok_or(Error::from_message("Invalid date"))?
                     )
                 )
             }
@@ -520,7 +520,7 @@ impl ResultSet {
                     date_rec.dateminute as u32, 
                     date_rec.datesecond as u32, 
                     date_rec.datemsecond as u32)
-                    .ok_or(Error::new(None, None, "Invalid time"))?))
+                    .ok_or(Error::from_message("Invalid time"))?))
             }
         }
     }
@@ -533,12 +533,12 @@ impl ResultSet {
                     date_rec.dateyear,
                     (date_rec.datemonth + 1) as u32,
                     date_rec.datedmonth as u32)
-                    .ok_or(Error::new(None, None, "Invalid date"))?;
+                    .ok_or(Error::from_message("Invalid date"))?;
                 Ok(Some(date.and_hms_milli_opt(date_rec.datehour as u32, 
                     date_rec.dateminute as u32, 
                     date_rec.datesecond as u32, 
                     date_rec.datemsecond as u32)
-                    .ok_or(Error::new(None, None, "Invalid time"))?))
+                    .ok_or(Error::from_message("Invalid time"))?))
             }
         }
     }
@@ -591,10 +591,10 @@ impl ResultSet {
                         let mut dstdata: Vec<u8> = vec![0u8; dstfmt.maxlength as usize];
                         let dstlen = self.conn.convert(&fmt, &buffer, &dstfmt, &mut dstdata)?;
                         let s = String::from_utf8_lossy(&dstdata.as_slice()[0..dstlen]).to_string();
-                        Ok(Some(Decimal::from_str_exact(&s).map_err(|_| Error::new(None, None, "Invalid decimal"))?))
+                        Ok(Some(Decimal::from_str_exact(&s).map_err(|_| Error::from_message("Invalid decimal"))?))
                     },
                     _ => {
-                        Err(Error::new(None, None, "Unsupported datatype"))
+                        Err(Error::from_message("Unsupported datatype"))
                     }
                 }
             }
@@ -632,7 +632,7 @@ impl ResultSet {
                 }
             },
             _ => {
-                Err(Error::new(None, None, "Invalid conversion"))
+                Err(Error::from_message("Invalid conversion"))
                 // let mut dstfmt: CS_DATAFMT = Default::default();
                 // dstfmt.datatype = CS_DATETIME_TYPE;
                 // dstfmt.maxlength = mem::size_of::<CS_DATETIME>() as i32;
