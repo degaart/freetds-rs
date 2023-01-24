@@ -1,3 +1,5 @@
+#![allow(clippy::useless_transmute)]
+
 use std::ffi::CString;
 use std::mem;
 use std::ptr;
@@ -67,13 +69,13 @@ impl Command {
                         let cmd = self.cmd.lock().unwrap();
                         ret = ct_command(
                             cmd.handle,
-                            cmd_type as i32,
+                            cmd_type,
                             mem::transmute(buffer.as_ptr()),
                             CS_NULLTERM,
                             option);
                     }
                     if ret != CS_SUCCEED {
-                        return Err(self.conn.get_error().unwrap_or(Error::from_message("ct_command failed")));
+                        return Err(self.conn.get_error().unwrap_or_else(|| Error::from_message("ct_command failed")));
                     }
                 }
             }
@@ -91,7 +93,7 @@ impl Command {
         if ret == CS_SUCCEED {
             Ok(())
         } else {
-            Err(self.conn.get_error().unwrap_or(Error::from_message("ct_send failed")))
+            Err(self.conn.get_error().unwrap_or_else(|| Error::from_message("ct_send failed")))
         }
     
     }
@@ -105,7 +107,7 @@ impl Command {
             ret = ct_results(cmd.handle, &mut result_type);
         }
         if ret != CS_SUCCEED && ret != CS_END_RESULTS {
-            Err(self.conn.get_error().unwrap_or(Error::from_message("ct_results failed")))
+            Err(self.conn.get_error().unwrap_or_else(|| Error::from_message("ct_results failed")))
         } else {
             Ok((ret == CS_SUCCEED, result_type))
         }
@@ -121,7 +123,7 @@ impl Command {
         if ret == CS_SUCCEED {
             Ok(())
         } else {
-            Err(self.conn.get_error().unwrap_or(Error::from_message("ct_bind failed")))
+            Err(self.conn.get_error().unwrap_or_else(|| Error::from_message("ct_bind failed")))
         }
     }
 
@@ -138,7 +140,7 @@ impl Command {
         } else if ret == CS_END_DATA {
             Ok(false)
         } else {
-            Err(self.conn.get_error().unwrap_or(Error::from_message("ct_fetch failed")))
+            Err(self.conn.get_error().unwrap_or_else(|| Error::from_message("ct_fetch failed")))
         }
     }
 
@@ -160,7 +162,7 @@ impl Command {
         if ret == CS_SUCCEED {
             Ok(buf)
         } else {
-            Err(self.conn.get_error().unwrap_or(Error::from_message("ct_res_info failed")))
+            Err(self.conn.get_error().unwrap_or_else(|| Error::from_message("ct_res_info failed")))
         }
     }
 
@@ -176,7 +178,7 @@ impl Command {
         if ret == CS_SUCCEED {
             Ok(buf)
         } else {
-            Err(self.conn.get_error().unwrap_or(Error::from_message("ct_describe failed")))
+            Err(self.conn.get_error().unwrap_or_else(|| Error::from_message("ct_describe failed")))
         }
     }
 
@@ -189,7 +191,7 @@ impl Command {
         if ret == CS_SUCCEED {
             Ok(())
         } else {
-            Err(self.conn.get_error().unwrap_or(Error::from_message("ct_cancel failed")))
+            Err(self.conn.get_error().unwrap_or_else(|| Error::from_message("ct_cancel failed")))
         }
     }
 

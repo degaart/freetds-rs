@@ -1,4 +1,4 @@
-use std::{fmt::Display};
+use std::fmt::Display;
 
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
 pub enum Type {
@@ -55,7 +55,7 @@ impl Error {
     }
 
     pub fn severity(&self) -> Option<i32> {
-        return self.severity;
+        self.severity
     }
 
 }

@@ -1,3 +1,5 @@
+#![allow(clippy::expect_fun_call)]
+
 use crate::{ParsedQuery, ColumnId, ParamValue, parse_query};
 
 pub struct Statement {

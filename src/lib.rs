@@ -64,6 +64,8 @@ pub(crate) fn parse_query(text: impl AsRef<str>) -> ParsedQuery {
                 match c {
                     '\'' | '"' => {
                         cur.push(c);
+
+                        #[allow(clippy::while_let_on_iterator)]
                         while let Some(c1) = it.next() {
                             cur.push(c1);
                             if c1 == c {
@@ -74,6 +76,7 @@ pub(crate) fn parse_query(text: impl AsRef<str>) -> ParsedQuery {
                     '/' => {
                         cur.push(c);
                         if it.peek().unwrap_or(&'\0') == &'*' {
+                            #[allow(clippy::while_let_on_iterator)]
                             while let Some(c1) = it.next() {
                                 cur.push(c1);
                                 if c1 == '*' && it.peek().unwrap_or(&'\0') == &'/' {
@@ -85,6 +88,7 @@ pub(crate) fn parse_query(text: impl AsRef<str>) -> ParsedQuery {
                     '-' => {
                         cur.push(c);
                         if it.peek().unwrap_or(&'\0') == &'-' {
+                            #[allow(clippy::while_let_on_iterator)]
                             while let Some(c1) = it.next() {
                                 cur.push(c1);
                                 if c1 == '\n' {
@@ -94,7 +98,7 @@ pub(crate) fn parse_query(text: impl AsRef<str>) -> ParsedQuery {
                         }
                     },
                     '?' => {
-                        if cur.len() > 0 {
+                        if !cur.is_empty() {
                             pieces.push(TextPiece::Literal(cur.clone()));
                             cur.clear();
                         }
@@ -102,7 +106,7 @@ pub(crate) fn parse_query(text: impl AsRef<str>) -> ParsedQuery {
                         params.push(None);
                     },
                     ':' => {
-                        if let None = it.peek() {
+                        if it.peek().is_none() {
                             cur.push(c);
                         } else {
                             if !cur.is_empty() {
@@ -111,6 +115,7 @@ pub(crate) fn parse_query(text: impl AsRef<str>) -> ParsedQuery {
                             }
 
                             let mut name = String::new();
+                            #[allow(clippy::while_let_on_iterator)]
                             while let Some(c) = it.peek() {
                                 if c.is_alphanumeric() || *c == '_' {
                                     name.push(*c);
@@ -136,7 +141,7 @@ pub(crate) fn parse_query(text: impl AsRef<str>) -> ParsedQuery {
         }
     }
 
-    if cur.len() > 0 {
+    if !cur.is_empty() {
         pieces.push(TextPiece::Literal(cur.clone()));
     }
     
@@ -165,7 +170,7 @@ where
             }
         });
     }
-    return result;
+    result
 }
 
 #[cfg(test)]

@@ -1,3 +1,5 @@
+#![allow(clippy::expect_fun_call)]
+
 use std::{mem, rc::Rc, ops::Deref};
 use chrono::{NaiveDate, NaiveTime, NaiveDateTime};
 use freetds_sys::*;
@@ -45,7 +47,7 @@ impl ResultSet {
     pub fn next_resultset(&mut self) -> bool {
         match self.pos {
             None => {
-                if self.results.len() == 0 {
+                if self.results.is_empty() {
                     return false;
                 } else {
                     self.pos = Some(0);
@@ -56,20 +58,19 @@ impl ResultSet {
             }
         }
 
-        return self.pos.unwrap() < self.results.len();
+        self.pos.unwrap() < self.results.len()
     }
 
+    #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> bool {
-        if self.pos.is_none() {
-            if !self.next_resultset() {
-                return false;
-            }
+        if self.pos.is_none() && !self.next_resultset() {
+            return false;
         }
 
         let result = &mut self.results[self.pos.unwrap()];
         match result.pos {
             None => {
-                if result.rows.len() == 0 {
+                if result.rows.is_empty() {
                     return false;
                 } else {
                     result.pos = Some(0);
@@ -80,11 +81,11 @@ impl ResultSet {
             }
         }
 
-        return result.pos.unwrap() < result.rows.len();
+        result.pos.unwrap() < result.rows.len()
     }
 
     pub fn has_rows(&self) -> bool {
-        self.results.len() > 0
+        !self.results.is_empty()
     }
 
     pub fn column_count(&self) -> Result<usize> {
@@ -141,7 +142,7 @@ impl ResultSet {
             ColumnId::String(s) => {
                 let mut column_index: Option<usize> = None;
                 for i in 0..self.column_count()? {
-                    if self.column_name(i)?.unwrap_or(String::from("")) == s {
+                    if self.column_name(i)?.unwrap_or_else(|| String::from("")) == s {
                         column_index = Some(i);
                         break;
                     }
@@ -161,7 +162,7 @@ impl ResultSet {
                 Ok(None)
             },
             Some(buffer) => {
-                Ok(Some((column.fmt.clone(), Rc::clone(buffer))))
+                Ok(Some((column.fmt, Rc::clone(buffer))))
             }
         }
     }
@@ -170,15 +171,17 @@ impl ResultSet {
     where
         T: Copy
     {
-        let mut dstfmt: CS_DATAFMT = Default::default();
-        dstfmt.datatype = dstdatatype;
-        dstfmt.maxlength = mem::size_of::<T>() as i32;
-        dstfmt.format = CS_FMT_UNUSED as i32;
-        dstfmt.count = 1;
+        let dstfmt = CS_DATAFMT {
+            datatype: dstdatatype,
+            maxlength: mem::size_of::<T>() as i32,
+            format: CS_FMT_UNUSED as i32,
+            count: 1,
+            ..Default::default()
+        };
 
         let mut dstdata: Vec<u8> = vec![0u8; dstfmt.maxlength as usize];
         let dstlen = self.conn.convert(
-            &srcfmt, srcbuffer,
+            srcfmt, srcbuffer,
             &dstfmt,
             &mut dstdata)?;
         
@@ -215,7 +218,7 @@ impl ResultSet {
             ColumnId::String(s) => {
                 let mut column_index: Option<usize> = None;
                 for i in 0..self.column_count()? {
-                    if self.column_name(i)?.unwrap_or(String::from("")) == s {
+                    if self.column_name(i)?.unwrap_or_else(|| String::from("")) == s {
                         column_index = Some(i);
                         break;
                     }
@@ -230,7 +233,6 @@ impl ResultSet {
 
         let column = self.results[pos].columns[col].clone();
         let buffer = row.buffers[col].clone();
-        drop(row);
 
         match buffer {
             None => {
@@ -245,11 +247,13 @@ impl ResultSet {
                         Ok(Some(ParamValue::String(String::from_utf8_lossy(&buffer).to_string())))
                     },
                     CS_UNICHAR_TYPE => {
-                        let mut dstfmt: CS_DATAFMT = Default::default();
-                        dstfmt.datatype = CS_CHAR_TYPE;
-                        dstfmt.maxlength = buffer.len() as i32;
-                        dstfmt.format = CS_FMT_UNUSED as i32;
-                        dstfmt.count = 1;
+                        let dstfmt = CS_DATAFMT {
+                            datatype: CS_CHAR_TYPE,
+                            maxlength: buffer.len() as i32,
+                            format: CS_FMT_UNUSED as i32,
+                            count: 1,
+                            ..Default::default()
+                        };
 
                         let mut dstdata: Vec<u8> = vec![0u8; dstfmt.maxlength as usize];
                         let dstlen = self.conn.convert(&column.fmt, &buffer, &dstfmt, &mut dstdata)?;
@@ -266,7 +270,7 @@ impl ResultSet {
                                         (daterec.datemonth + 1) as u32,
                                         daterec.datedmonth as u32
                                     )
-                                    .ok_or(Error::from_message("Invalid date"))?
+                                    .ok_or_else(|| Error::from_message("Invalid date"))?
                                 )
                             },
                             CS_TIME_TYPE => {
@@ -277,7 +281,7 @@ impl ResultSet {
                                         daterec.datesecond as u32,
                                         daterec.datemsecond as u32
                                     )
-                                    .ok_or(Error::from_message("Invalid time"))?
+                                    .ok_or_else(|| Error::from_message("Invalid time"))?
                                 )
                             },
                             CS_DATETIME_TYPE | CS_DATETIME4_TYPE => {
@@ -287,14 +291,14 @@ impl ResultSet {
                                         (daterec.datemonth + 1) as u32,
                                         daterec.datedmonth as u32
                                     )
-                                    .ok_or(Error::from_message("Invalid date"))?
+                                    .ok_or_else(|| Error::from_message("Invalid date"))?
                                     .and_hms_milli_opt(
                                         daterec.datehour as u32,
                                         daterec.dateminute as u32,
                                         daterec.datesecond as u32,
                                         daterec.datemsecond as u32
                                     )
-                                    .ok_or(Error::from_message("Invalid date"))?
+                                    .ok_or_else(|| Error::from_message("Invalid date"))?
                                 )
                             },
                             _ => panic!("Invalid code path")
@@ -308,11 +312,13 @@ impl ResultSet {
                         }
                     },
                     CS_BIT_TYPE | CS_TINYINT_TYPE | CS_SMALLINT_TYPE => {
-                        let mut dstfmt: CS_DATAFMT = Default::default();
-                        dstfmt.datatype = CS_INT_TYPE;
-                        dstfmt.maxlength = mem::size_of::<i32>() as i32;
-                        dstfmt.format = CS_FMT_UNUSED as i32;
-                        dstfmt.count = 1;
+                        let dstfmt = CS_DATAFMT {
+                            datatype: CS_INT_TYPE,
+                            maxlength: mem::size_of::<i32>() as i32,
+                            format: CS_FMT_UNUSED as i32,
+                            count: 1,
+                            ..Default::default()
+                        };
 
                         let mut dstdata: Vec<u8> = vec![0u8; dstfmt.maxlength as usize];
                         let dstlen = self.conn.convert(
@@ -327,11 +333,13 @@ impl ResultSet {
                     },
                     CS_MONEY_TYPE | CS_MONEY4_TYPE | CS_DECIMAL_TYPE | CS_NUMERIC_TYPE => {
                         if column.fmt.precision == CS_DEF_PREC && column.fmt.scale == 0 {
-                            let mut dstfmt: CS_DATAFMT = Default::default();
-                            dstfmt.datatype = CS_BIGINT_TYPE;
-                            dstfmt.maxlength = mem::size_of::<i64>() as i32;
-                            dstfmt.format = CS_FMT_UNUSED as i32;
-                            dstfmt.count = 1;
+                            let dstfmt = CS_DATAFMT {
+                                datatype: CS_BIGINT_TYPE,
+                                maxlength: mem::size_of::<i64>() as i32,
+                                format: CS_FMT_UNUSED as i32,
+                                count: 1,
+                                ..Default::default()
+                            };
 
                             let mut dstdata: Vec<u8> = vec![0u8; dstfmt.maxlength as usize];
                             let dstlen = self.conn.convert(
@@ -344,13 +352,15 @@ impl ResultSet {
                                 Ok(Some(ParamValue::I64(*ptr)))
                             }
                         } else {
-                            let mut dstfmt: CS_DATAFMT = Default::default();
-                            dstfmt.datatype = CS_CHAR_TYPE;
-                            dstfmt.maxlength = 1024;
-                            dstfmt.format = CS_FMT_UNUSED as i32;
-                            dstfmt.precision = CS_SRC_VALUE;
-                            dstfmt.scale = CS_SRC_VALUE;
-                            dstfmt.count = 1;
+                            let dstfmt = CS_DATAFMT {
+                                datatype : CS_CHAR_TYPE,
+                                maxlength : 1024,
+                                format : CS_FMT_UNUSED as i32,
+                                precision : CS_SRC_VALUE,
+                                scale : CS_SRC_VALUE,
+                                count : 1,
+                                ..Default::default()
+                            };
 
                             let mut dstdata: Vec<u8> = vec![0u8; dstfmt.maxlength as usize];
                             let dstlen = self.conn.convert(&column.fmt, &buffer, &dstfmt, &mut dstdata)?;
@@ -469,18 +479,20 @@ impl ResultSet {
                         Ok(Some(value.to_string()))
                     },
                     _ => {
-                        let mut dstfmt: CS_DATAFMT = Default::default();
-                        dstfmt.datatype = CS_CHAR_TYPE;
-                        dstfmt.maxlength = match fmt.datatype {
-                            CS_BINARY_TYPE | CS_LONGBINARY_TYPE | CS_IMAGE_TYPE => {
-                                ((buffer.len() * 2) + 16) as i32
+                        let dstfmt = CS_DATAFMT {
+                            datatype: CS_CHAR_TYPE,
+                            maxlength: match fmt.datatype {
+                                CS_BINARY_TYPE | CS_LONGBINARY_TYPE | CS_IMAGE_TYPE => {
+                                    ((buffer.len() * 2) + 16) as i32
+                                },
+                                _ => {
+                                    128
+                                }
                             },
-                            _ => {
-                                128
-                            }
+                            format: CS_FMT_UNUSED as i32,
+                            count: 1,
+                            ..Default::default()
                         };
-                        dstfmt.format = CS_FMT_UNUSED as i32;
-                        dstfmt.count = 1;
 
                         let mut dstdata: Vec<u8> = vec![0u8; dstfmt.maxlength as usize];
                         let dstlen = self.conn.convert(
@@ -504,7 +516,7 @@ impl ResultSet {
                             dt.dateyear,
                             (dt.datemonth + 1) as u32,
                             dt.datedmonth as u32)
-                        .ok_or(Error::from_message("Invalid date"))?
+                        .ok_or_else(|| Error::from_message("Invalid date"))?
                     )
                 )
             }
@@ -520,7 +532,7 @@ impl ResultSet {
                     date_rec.dateminute as u32, 
                     date_rec.datesecond as u32, 
                     date_rec.datemsecond as u32)
-                    .ok_or(Error::from_message("Invalid time"))?))
+                    .ok_or_else(|| Error::from_message("Invalid time"))?))
             }
         }
     }
@@ -533,12 +545,12 @@ impl ResultSet {
                     date_rec.dateyear,
                     (date_rec.datemonth + 1) as u32,
                     date_rec.datedmonth as u32)
-                    .ok_or(Error::from_message("Invalid date"))?;
+                    .ok_or_else(|| Error::from_message("Invalid date"))?;
                 Ok(Some(date.and_hms_milli_opt(date_rec.datehour as u32, 
                     date_rec.dateminute as u32, 
                     date_rec.datesecond as u32, 
                     date_rec.datemsecond as u32)
-                    .ok_or(Error::from_message("Invalid time"))?))
+                    .ok_or_else(|| Error::from_message("Invalid time"))?))
             }
         }
     }
@@ -555,11 +567,13 @@ impl ResultSet {
                         panic!("Not implemented yet");
                     },
                     _ => {
-                        let mut dstfmt: CS_DATAFMT = Default::default();
-                        dstfmt.datatype = CS_BINARY_TYPE;
-                        dstfmt.maxlength = fmt.maxlength;
-                        dstfmt.format = CS_FMT_UNUSED as i32;
-                        dstfmt.count = 1;
+                        let dstfmt = CS_DATAFMT {
+                            datatype: CS_BINARY_TYPE,
+                            maxlength: fmt.maxlength,
+                            format: CS_FMT_UNUSED as i32,
+                            count: 1,
+                            ..Default::default()
+                        };
         
                         let mut dstdata: Vec<u8> = Vec::new();
                         dstdata.resize(dstfmt.maxlength as usize, Default::default());
@@ -580,13 +594,15 @@ impl ResultSet {
                     CS_INT_TYPE | CS_BIT_TYPE | CS_TINYINT_TYPE | CS_SMALLINT_TYPE |
                     CS_NUMERIC_TYPE | CS_MONEY_TYPE | CS_MONEY4_TYPE | CS_DECIMAL_TYPE |
                     CS_REAL_TYPE | CS_FLOAT_TYPE => {
-                        let mut dstfmt: CS_DATAFMT = Default::default();
-                        dstfmt.datatype = CS_CHAR_TYPE;
-                        dstfmt.maxlength = 1024;
-                        dstfmt.format = CS_FMT_UNUSED as i32;
-                        dstfmt.precision = CS_SRC_VALUE;
-                        dstfmt.scale = CS_SRC_VALUE;
-                        dstfmt.count = 1;
+                        let dstfmt = CS_DATAFMT {
+                            datatype: CS_CHAR_TYPE,
+                            maxlength: 1024,
+                            format: CS_FMT_UNUSED as i32,
+                            precision: CS_SRC_VALUE,
+                            scale: CS_SRC_VALUE,
+                            count: 1,
+                            ..Default::default()
+                        };
 
                         let mut dstdata: Vec<u8> = vec![0u8; dstfmt.maxlength as usize];
                         let dstlen = self.conn.convert(&fmt, &buffer, &dstfmt, &mut dstdata)?;
@@ -633,23 +649,6 @@ impl ResultSet {
             },
             _ => {
                 Err(Error::from_message("Invalid conversion"))
-                // let mut dstfmt: CS_DATAFMT = Default::default();
-                // dstfmt.datatype = CS_DATETIME_TYPE;
-                // dstfmt.maxlength = mem::size_of::<CS_DATETIME>() as i32;
-                // dstfmt.format = CS_FMT_UNUSED as i32;
-                // dstfmt.count = 1;
-
-                // let mut dstdata: Vec<u8> = vec![0u8; dstfmt.maxlength as usize];
-                // let dstlen = self.conn.convert(
-                //     &fmt, &buffer,
-                //     &dstfmt,
-                //     &mut dstdata)?;
-                
-                // assert!(dstlen == mem::size_of::<CS_DATETIME>());
-                // unsafe {
-                //     let buf: *const CS_DATETIME = mem::transmute(dstdata.as_ptr());
-                //     Ok(self.conn.crack_datetime(*buf)?)
-                // }
             }
         }
     }
@@ -673,10 +672,7 @@ impl ResultSet {
     }
 
     pub fn error(&self) -> Option<Error> {
-        match self.messages.first() {
-            None => None,
-            Some(error) => Some(error.clone())
-        }
+        self.messages.first().cloned()
     }
 
 }

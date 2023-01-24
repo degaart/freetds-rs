@@ -23,7 +23,7 @@ impl ToSql for String {
             }
         }
         result.push('\'');
-        return result;
+        result
     }
 }
 
@@ -38,31 +38,31 @@ impl ToSql for &str {
             }
         }
         result.push('\'');
-        return result;
+        result
     }
 }
 
 impl ToSql for i32 {
     fn to_sql(&self) -> String {
-        return format!("{}", self);
+        format!("{}", self)
     }
 }
 
 impl ToSql for i64 {
     fn to_sql(&self) -> String {
-        return format!("{}", self);
+        format!("{}", self)
     }
 }
 
 impl ToSql for f64 {
     fn to_sql(&self) -> String {
-        return format!("{}", self);
+        format!("{}", self)
     }
 }
 
 impl ToSql for Decimal {
     fn to_sql(&self) -> String {
-        return format!("{}", self.to_string());
+        self.to_string()
     }
 }
 
@@ -91,7 +91,7 @@ impl ToSql for Vec<u8> {
         for c in self.iter() {
             result.push_str(&format!("{:02X}", c));
         }
-        return result;
+        result
     }
 }
 
@@ -102,7 +102,7 @@ impl ToSql for &[u8] {
         for c in self.iter() {
             result.push_str(&format!("{:02X}", c));
         }
-        return result;
+        result
     }
 }
 

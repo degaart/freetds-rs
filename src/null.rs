@@ -1,3 +1,5 @@
+#![allow(clippy::self_named_constructors)]
+
 pub struct Null {}
 
 impl Null {

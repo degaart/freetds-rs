@@ -1,4 +1,4 @@
-#![allow(unused)]
+#![allow(clippy::useless_transmute)]
 
 use std::collections::HashMap;
 use std::ffi::{CStr, c_void};
@@ -15,9 +15,11 @@ use crate::result_set::{ResultSet, Rows, Column, Row};
 use crate::{property::Property, Result, error::Error, command::Command};
 use crate::to_sql::ToSql;
 
+type DiagnosticsMap = HashMap<usize,Box<dyn Fn(Error) + Send>>;
+
 /* TODO: Investigate using cs_config(CS_USERDATA) and a Pin<Mutex<T>> */
 struct Diagnostics {
-    handlers: Mutex<HashMap<usize,Box<dyn Fn(Error) + Send>>>
+    handlers: Mutex<DiagnosticsMap>
 }
 
 impl Diagnostics {
@@ -29,7 +31,7 @@ impl Diagnostics {
 
     fn set_handler(ctx: *const CS_CONTEXT, handler: Box<dyn Fn(Error) + Send>) {
         DIAGNOSTICS
-            .get_or_init(|| Diagnostics::new())
+            .get_or_init(Diagnostics::new)
             .handlers
             .lock()
             .unwrap()
@@ -51,7 +53,7 @@ static DIAGNOSTICS: OnceCell<Diagnostics> = OnceCell::new();
 extern "C" fn csmsg_callback(ctx: *const CS_CONTEXT, msg: *const CS_CLIENTMSG) -> CS_RETCODE {
     let key = ctx as usize;
     let handlers = DIAGNOSTICS
-        .get_or_init(|| Diagnostics::new())
+        .get_or_init(Diagnostics::new)
         .handlers
         .lock()
         .unwrap();
@@ -77,7 +79,7 @@ extern "C" fn clientmsg_callback(
 ) -> CS_RETCODE {
     let key = ctx as usize;
     let handlers = DIAGNOSTICS
-        .get_or_init(|| Diagnostics::new())
+        .get_or_init(Diagnostics::new)
         .handlers
         .lock()
         .unwrap();
@@ -102,7 +104,7 @@ extern "C" fn servermsg_callback(
 ) -> CS_RETCODE {
     let key = ctx as usize;
     let handlers = DIAGNOSTICS
-        .get_or_init(|| Diagnostics::new())
+        .get_or_init(Diagnostics::new)
         .handlers
         .lock()
         .unwrap();
@@ -113,7 +115,7 @@ extern "C" fn servermsg_callback(
         handler(Error {
             type_: error::Type::Server,
             code: Some((*msg).msgnumber),
-            desc: CStr::from_ptr(mem::transmute((*msg).text.as_ptr())).to_string_lossy().trim_end().to_string(),
+            desc: CStr::from_ptr((*msg).text.as_ptr()).to_string_lossy().trim_end().to_string(),
             severity: Some((*msg).severity),
         });
     }
@@ -127,11 +129,13 @@ struct Bind {
     indicator: i16
 }
 
+type MessageCallback = Box<dyn Fn(&Error) -> bool + Send>;
+
 pub(crate) struct CSConnection {
     pub ctx_handle: *mut CS_CONTEXT,
     pub conn_handle: *mut CS_CONNECTION,
     pub messages: Arc<Mutex<Vec<Error>>>,
-    pub msg_callback: Arc<Mutex<Option<Box<dyn Fn(&Error) -> bool + Send>>>>,
+    pub msg_callback: Arc<Mutex<Option<MessageCallback>>>,
 }
 
 impl CSConnection {
@@ -310,45 +314,44 @@ impl Connection {
     fn set_props(&mut self, property: u32, value: Property) -> Result<()> {
         self.diag_clear();
         unsafe {
-            let ret;
-            match value {
+            let ret = match value {
                 Property::I32(mut i) => {
-                    ret = ct_con_props(
+                    ct_con_props(
                         self.conn.lock().unwrap().conn_handle,
                         CS_SET,
                         property as CS_INT,
                         std::mem::transmute(&mut i),
                         mem::size_of::<i32>() as i32,
-                        ptr::null_mut());
+                        ptr::null_mut())
                 },
                 Property::U32(mut i) => {
-                    ret = ct_con_props(
+                    ct_con_props(
                         self.conn.lock().unwrap().conn_handle,
                         CS_SET,
                         property as CS_INT,
                         std::mem::transmute(&mut i),
                         mem::size_of::<u32>() as i32,
-                        ptr::null_mut());
+                        ptr::null_mut())
                 },
                 Property::String(s) => {
                     let s1 = CString::new(s)?;
-                    ret = ct_con_props(
+                    ct_con_props(
                         self.conn.lock().unwrap().conn_handle,
                         CS_SET,
                         property as CS_INT,
                         std::mem::transmute(s1.as_ptr()),
                         s.len() as i32,
-                        ptr::null_mut());
+                        ptr::null_mut())
                 },
                 _ => {
                     return Err(Error::from_message("Invalid argument"));
                 }
-            }
+            };
 
             if ret == CS_SUCCEED {
                 Ok(())
             } else {
-                Err(self.get_error().unwrap_or(Error::from_message("ct_con_props failed")))
+                Err(self.get_error().unwrap_or_else(|| Error::from_message("ct_con_props failed")))
             }
         }
     }
@@ -372,7 +375,7 @@ impl Connection {
             Ok(())
         } else {
             let err = self.get_error();
-            Err(err.unwrap_or(Error::from_message("ct_connect failed")))
+            Err(err.unwrap_or_else(|| Error::from_message("ct_connect failed")))
         }
     }
 
@@ -389,7 +392,7 @@ impl Connection {
             &parsed_query,
             params
                 .iter()
-                .map(|i| *i)
+                .copied()
         );
 
         let mut command = Command::new(self.clone());
@@ -409,7 +412,7 @@ impl Connection {
             /*
                 Collect diag messages because command.results() clears them
             */
-            errors.extend(self.diag_get().iter().map(|e| e.clone()));
+            errors.extend(self.diag_get().iter().cloned());
 
             match res_type {
                 CS_ROW_RESULT => {
@@ -474,7 +477,7 @@ impl Connection {
             .collect();
         let text = generate_query(
             &st.query,
-            params.iter().map(|p| *p)
+            params.iter().copied()
         );
         debug!("Generated statement: {}", text);
 
@@ -495,7 +498,7 @@ impl Connection {
             /*
                 Collect diag messages because command.results() clears them
             */
-            errors.extend(self.diag_get().iter().map(|e| e.clone()));
+            errors.extend(self.diag_get().iter().cloned());
 
             match res_type {
                 CS_ROW_RESULT => {
@@ -638,7 +641,7 @@ impl Connection {
         let errors = self.diag_get();
         errors.iter()
             .find(|e| e.severity.unwrap_or(i32::MAX) > 10)
-            .map(|e| e.clone())
+            .cloned()
     }
 
     pub fn is_connected(&mut self) -> bool {
@@ -669,7 +672,7 @@ impl Connection {
     pub fn db_name(&mut self) -> Result<String> {
         let mut rs = self.execute("select db_name()", &[])?;
         assert!(rs.next());
-        Ok(rs.get_string(0)?.ok_or(Error::from_message("Cannot get database name"))?)
+        rs.get_string(0)?.ok_or_else(|| Error::from_message("Cannot get database name"))
     }
 
     pub(crate) fn convert(&mut self, srcfmt: &CS_DATAFMT, srcdata: &[u8], dstfmt: &CS_DATAFMT, dstdata: &mut [u8]) -> Result<usize> {
@@ -686,7 +689,7 @@ impl Connection {
                 &mut dstlen);
         }
         if ret != CS_SUCCEED {
-            Err(self.get_error().unwrap_or(Error::from_message("cs_convert failed")))
+            Err(self.get_error().unwrap_or_else(|| Error::from_message("cs_convert failed")))
         } else {
             Ok(dstlen as usize)
         }
@@ -699,7 +702,7 @@ impl Connection {
             ret = cs_dt_crack(self.conn.lock().unwrap().ctx_handle, type_, mem::transmute(dateval), &mut daterec);
         }
         if ret != CS_SUCCEED {
-            return Err(self.get_error().unwrap_or(Error::from_message("cs_dt_crack failed")));
+            return Err(self.get_error().unwrap_or_else(|| Error::from_message("cs_dt_crack failed")));
         }
         Ok(daterec)
     }
@@ -740,6 +743,12 @@ impl Connection {
             .msg_callback.lock().unwrap() = None;
     }
 
+}
+
+impl Default for Connection {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 unsafe impl Send for Connection {}
