@@ -60,10 +60,12 @@ extern "C" fn csmsg_callback(ctx: *const CS_CONTEXT, msg: *const CS_CLIENTMSG) -
         .expect("context not found in Diagnostics::handlers");
 
     unsafe {
-        handler(Error::new(
-                Some(error::Type::Cs),
-                Some((*msg).msgnumber),
-                CStr::from_ptr((*msg).msgstring.as_ptr()).to_string_lossy().trim_end()));
+        handler(Error {
+            type_: error::Type::Cs,
+            code: Some((*msg).msgnumber),
+            desc: CStr::from_ptr((*msg).msgstring.as_ptr()).to_string_lossy().trim_end().to_string(),
+            severity: Some((*msg).severity),
+        });
     }
     CS_SUCCEED
 }
@@ -83,10 +85,12 @@ extern "C" fn clientmsg_callback(
     let handler = handlers.get(&key)
         .expect("context not found in Diagnostics::handlers");
     unsafe {
-        handler(Error::new(
-                Some(error::Type::Client),
-                Some((*msg).msgnumber),
-                CStr::from_ptr((*msg).msgstring.as_ptr()).to_string_lossy().trim_end()));
+        handler(Error {
+            type_: error::Type::Client,
+            code: Some((*msg).msgnumber),
+            desc: CStr::from_ptr((*msg).msgstring.as_ptr()).to_string_lossy().trim_end().to_string(),
+            severity: Some((*msg).severity),
+        });
     }
     CS_SUCCEED
 }
@@ -106,10 +110,12 @@ extern "C" fn servermsg_callback(
     let handler = handlers.get(&key)
         .expect("context not found in Diagnostics::handlers");
     unsafe {
-        handler(Error::new(
-                Some(error::Type::Server),
-                Some((*msg).msgnumber),
-                CStr::from_ptr(mem::transmute((*msg).text.as_ptr())).to_string_lossy().trim_end()));
+        handler(Error {
+            type_: error::Type::Server,
+            code: Some((*msg).msgnumber),
+            desc: CStr::from_ptr(mem::transmute((*msg).text.as_ptr())).to_string_lossy().trim_end().to_string(),
+            severity: Some((*msg).severity),
+        });
     }
     CS_SUCCEED
 }
@@ -125,7 +131,7 @@ pub(crate) struct CSConnection {
     pub ctx_handle: *mut CS_CONTEXT,
     pub conn_handle: *mut CS_CONNECTION,
     pub messages: Arc<Mutex<Vec<Error>>>,
-    pub msg_callback: Arc<Mutex<Option<Box<dyn Fn(&Error) + Send>>>>,
+    pub msg_callback: Arc<Mutex<Option<Box<dyn Fn(&Error) -> bool + Send>>>>,
 }
 
 impl CSConnection {
@@ -136,14 +142,16 @@ impl CSConnection {
             assert_eq!(CS_SUCCEED, ret);
 
             let messages = Arc::new(Mutex::new(Vec::new()));
-            let msg_callback = Arc::new(Mutex::new(None::<Box<dyn Fn(&Error) + Send>>));
+            let msg_callback = Arc::new(Mutex::new(None::<Box<dyn Fn(&Error) -> bool + Send>>));
 
             let diag_messages = Arc::clone(&messages);
             let diag_callback = Arc::clone(&msg_callback);
             Diagnostics::set_handler(ctx_handle, Box::new(move |msg| {
                 let callback = diag_callback.lock().unwrap();
                 if let Some(f) = callback.as_ref() {
-                    f(&msg);
+                    if !f(&msg) {
+                        return;
+                    }
                 }
 
                 diag_messages
@@ -629,7 +637,7 @@ impl Connection {
     pub fn get_error(&mut self) -> Option<Error> {
         let errors = self.diag_get();
         errors.iter()
-            .nth(0)
+            .find(|e| e.severity.unwrap_or(i32::MAX) > 10)
             .map(|e| e.clone())
     }
 
@@ -661,7 +669,7 @@ impl Connection {
     pub fn db_name(&mut self) -> Result<String> {
         let mut rs = self.execute("select db_name()", &[])?;
         assert!(rs.next());
-        Ok(rs.get_string(0)?.ok_or(Error::new(None, None, "Cannot get database name"))?)
+        Ok(rs.get_string(0)?.ok_or(Error::from_message("Cannot get database name"))?)
     }
 
     pub(crate) fn convert(&mut self, srcfmt: &CS_DATAFMT, srcdata: &[u8], dstfmt: &CS_DATAFMT, dstdata: &mut [u8]) -> Result<usize> {
@@ -720,7 +728,7 @@ impl Connection {
         }
     }
 
-    pub fn set_message_callback(&mut self, callback: Box<dyn Fn(&Error) + Send>) {
+    pub fn set_message_callback(&mut self, callback: Box<dyn Fn(&Error) -> bool + Send>) {
         *self.conn
             .lock().unwrap()
             .msg_callback.lock().unwrap() = Some(callback);
@@ -1077,6 +1085,7 @@ mod tests {
         let msg2 = Arc::clone(&msg);
         conn.set_message_callback(Box::new(move |e| {
             *msg2.lock().unwrap().borrow_mut() = Some(e.desc().to_string());
+            true
         }));
         let text = 
             "selecta \
