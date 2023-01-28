@@ -303,7 +303,7 @@ impl Drop for CSConnection {
     }
 }
 
-#[derive(Clone,Copy)]
+#[derive(Clone,Copy,Debug)]
 pub enum TdsVersion {
     Auto,
     Tds40,
@@ -316,7 +316,7 @@ pub enum TdsVersion {
     Tds74,
 }
 
-#[derive(Default,Clone)]
+#[derive(Default,Clone,Debug)]
 pub struct ConnectionBuilder {
     host: Option<String>,
     port: Option<u16>,
@@ -364,6 +364,10 @@ impl ConnectionBuilder {
     pub fn database(mut self, database: &str) -> Self {
         self.database = Some(database.to_string());
         self
+    }
+
+    pub fn get_database(&self) -> Option<String> {
+        self.database.clone()
     }
 
     pub fn tds_version(mut self, version: TdsVersion) -> Self {
