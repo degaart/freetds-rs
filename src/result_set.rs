@@ -34,31 +34,36 @@ impl Rows {
     }
 }
 
+pub(crate) enum SybResult {
+    Rows(Rows),
+    Status(i32),
+    UpdateCount(u64),
+}
+
 pub struct ResultSet {
     pub(crate) conn: Connection,
-    pub(crate) results: Vec<Rows>,
+
+    /* current result index */
     pub(crate) pos: Option<usize>,
-    pub(crate) status: Option<i32>,
+    pub(crate) results: Vec<SybResult>,
     pub(crate) messages: Vec<Error>,
 }
 
 impl ResultSet {
     pub(crate) fn new(
         conn: Connection,
-        results: Vec<Rows>,
-        status: Option<i32>,
+        results: Vec<SybResult>,
         messages: Vec<Error>,
     ) -> Self {
         Self {
             conn,
+            pos: None,
             results,
-            pos: Default::default(),
-            status,
             messages,
         }
     }
 
-    pub fn next_resultset(&mut self) -> bool {
+    pub fn next_results(&mut self) -> bool {
         match self.pos {
             None => {
                 if self.results.is_empty() {
@@ -72,111 +77,222 @@ impl ResultSet {
             }
         }
 
-        self.pos.unwrap() < self.results.len()
+        self.pos.expect("Unexpected None value") < self.results.len()
+    }
+
+    /*
+     * Seek self.result_index to next item in results which contains rows
+     * and return the new result
+     * If no more row result, return None and set result_index out of range value
+     */
+    fn next_row_result(&mut self) -> Option<usize> {
+        for (i, r) in self.results.iter().skip(self.pos.unwrap_or(0)).enumerate() {
+            if let SybResult::Rows(_) = r {
+                self.pos = Some(i);
+                return Some(i);
+            }
+        }
+        self.pos = Some(self.results.len());
+        return None;
+    }
+
+    fn next_status_result(&mut self) -> Option<usize> {
+        for (i, r) in self.results.iter().skip(self.pos.unwrap_or(0)).enumerate() {
+            if let SybResult::Status(_) = r {
+                self.pos = Some(i);
+                return Some(i);
+            }
+        }
+        self.pos = Some(self.results.len());
+        return None;
+    }
+
+    fn next_update_count_result(&mut self) -> Option<usize> {
+        for (i, r) in self.results.iter().skip(self.pos.unwrap_or(0)).enumerate() {
+            if let SybResult::UpdateCount(_) = r {
+                self.pos = Some(i);
+                return Some(i);
+            }
+        }
+        self.pos = Some(self.results.len());
+        return None;
     }
 
     #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> bool {
-        if self.pos.is_none() && !self.next_resultset() {
-            return false;
+        /*
+         * On the first call, we seek to next row results
+         */
+        if self.pos.is_none() {
+            if self.next_row_result().is_none() {
+                return false;
+            }
         }
 
-        let result = &mut self.results[self.pos.unwrap()];
-        match result.pos {
-            None => {
-                if result.rows.is_empty() {
-                    return false;
-                } else {
-                    result.pos = Some(0);
+        /*
+         * We can assume here that result_index is not None
+         */
+        let result_index = self.pos.expect("Unexpected None value");
+        match self.results.get_mut(result_index) {
+            Some(result) => {
+                match result {
+                    SybResult::Rows(rows) => {
+                        if rows.rows.is_empty() {
+                            rows.pos = Some(rows.rows.len());
+                            return false;
+                        }
+
+                        if let Some(pos) = rows.pos {
+                            rows.pos = Some(pos + 1);
+                        } else {
+                            rows.pos = Some(0);
+                        }
+
+                        rows.pos.expect("Unexpected None value") < rows.rows.len()
+                    },
+                    _ => false, /* Current results do not contain rows */
+                }
+            },
+
+            /* End of results */
+            None => false,
+        }
+    }
+
+    /*
+     * Returns true if current results contains SybResult::rows
+     */
+    pub fn is_rows(&self) -> bool {
+        if let SybResult::Rows(_) = self.results[self.pos.unwrap_or(0)] {
+            true
+        } else {
+            false
+        }
+    }
+
+    /*
+     * Returns true if current results contains SybResult::Status
+     */
+    pub fn is_status(&self) -> bool {
+        if let SybResult::Status(_) = self.results[self.pos.unwrap_or(0)] {
+            true
+        } else {
+            false
+        }
+    }
+
+    /*
+     * Returns true if current results contains SybResult::UpdateCount
+     */
+    pub fn is_update_count(&self) -> bool {
+        if let SybResult::UpdateCount(_) = self.results[self.pos.unwrap_or(0)] {
+            true
+        } else {
+            false
+        }
+    }
+
+    /*
+     * Seek to next row results if first call, then return the column count
+     */
+    pub fn column_count(&mut self) -> Result<usize> {
+        if self.pos.is_none() {
+            if !self.next_row_result().is_none() {
+                return Err(Error::from_message("Query did not return rows"));
+            }
+        }
+        let pos = self.pos.expect("Unexpected None value");
+        let results = self.results.get(pos);
+        if let Some(results) = results {
+            match results {
+                SybResult::Rows(rows) => {
+                    Ok(rows.columns.len())
+                },
+                _ => {
+                    Err(Error::from_message("Current results do not contain rows"))
                 }
             }
-            Some(pos) => {
-                result.pos = Some(pos + 1);
+        } else {
+            Err(Error::from_message("No more results"))
+        }
+    }
+
+    pub fn column_name(&mut self, index: usize) -> Result<String> {
+        if self.pos.is_none() {
+            if !self.next_row_result().is_none() {
+                return Err(Error::from_message("Query did not return rows"));
             }
         }
-
-        result.pos.unwrap() < result.rows.len()
-    }
-
-    pub fn has_rows(&self) -> bool {
-        !self.results.is_empty()
-    }
-
-    pub fn column_count(&self) -> Result<usize> {
-        let pos = self.pos.unwrap_or(0);
-        if pos >= self.results.len() {
-            return Err(Error::from_message("Invalid statement state"));
-        }
-
-        Ok(self.results[pos].columns.len())
-    }
-
-    pub fn column_name(&self, index: usize) -> Result<Option<String>> {
-        let pos = self.pos.unwrap_or(0);
-        if pos >= self.results.len() {
-            return Err(Error::from_message("Invalid statement state"));
-        }
-
-        if index >= self.results[pos].columns.len() {
-            return Err(Error::from_message("Invalid column index"));
-        }
-
-        let column_name = &self.results[pos].columns[index].name;
-        if column_name.is_empty() {
-            Ok(None)
+        let pos = self.pos.expect("Unexpected None value");
+        let results = self.results.get_mut(pos);
+        if let Some(results) = results {
+            match results {
+                SybResult::Rows(rows) => {
+                    if let Some(column) = rows.columns.get(index) {
+                        Ok(column.name.clone())
+                    } else {
+                        Err(Error::from_message("Invalid column index"))
+                    }
+                },
+                _ => {
+                    Err(Error::from_message("Current results do not contain rows"))
+                }
+            }
         } else {
-            Ok(Some(column_name.clone()))
+            Err(Error::from_message("No more results"))
         }
     }
 
     fn get_buffer(
-        &mut self,
+        &self,
         col: impl Into<ColumnId>,
-    ) -> Result<Option<(CS_DATAFMT, Rc<Vec<u8>>)>> {
+    ) -> Result<(CS_DATAFMT, Option<Rc<Vec<u8>>>)> {
         if self.pos.is_none() {
             return Err(Error::from_message("Invalid state"));
         }
 
-        let pos = self.pos.unwrap();
+        let pos = self.pos.expect("Unexpected None value");
         if pos >= self.results.len() {
-            return Err(Error::from_message("Invalid state"));
+            return Err(Error::from_message("ResultSet exhausted"));
         }
 
-        let results = &self.results[pos];
-        if results.pos.is_none() {
-            return Err(Error::from_message("Invalid state"));
-        }
+        if let Some(SybResult::Rows(rows)) = self.results.get(pos) {
+            let col: usize = match Into::<ColumnId>::into(col) {
+                ColumnId::I32(i) => match i.try_into() {
+                    Ok(i) => i,
+                    Err(_) => return Err(Error::from_message("Invalid column index")),
+                },
+                ColumnId::String(s) => {
+                    let column_index = rows.columns.iter().enumerate()
+                        .find(|(_,c)| c.name == s)
+                        .map(|(i,_)| i);
 
-        let pos = results.pos.unwrap();
-        if pos >= results.rows.len() {
-            return Err(Error::from_message("Invalid state"));
-        }
-
-        let row = &results.rows[pos];
-        let col: ColumnId = col.into();
-        let col: usize = match col {
-            ColumnId::I32(i) => i.try_into().expect("Invalid column index"),
-            ColumnId::String(s) => {
-                let mut column_index: Option<usize> = None;
-                for i in 0..self.column_count()? {
-                    if self.column_name(i)?.unwrap_or_else(|| String::from("")) == s {
-                        column_index = Some(i);
-                        break;
+                    if let Some(column_index) = column_index {
+                        column_index
+                    } else {
+                        return Err(Error::from_message("Invalid column index"));
                     }
                 }
-                column_index.expect(&format!("Invalid column name: {}", s))
+            };
+
+            if col >= rows.columns.len() {
+                return Err(Error::from_message("Invalid column index"));
             }
-        };
 
-        if col >= results.columns.len() {
-            return Err(Error::from_message("Invalid column index"));
-        }
+            let column = &rows.columns[col];
+            let row = if let Some(row) = rows.pos {
+                &rows.rows[row]
+            } else {
+                return Err(Error::from_message("Invalid state"));
+            };
 
-        let column = &results.columns[col];
-        let buffer = &row.buffers[col];
-        match buffer {
-            None => Ok(None),
-            Some(buffer) => Ok(Some((column.fmt, Rc::clone(buffer)))),
+            let buffer = &row.buffers[col];
+            match buffer {
+                None => Ok((column.fmt, None)),
+                Some(buffer) => Ok((column.fmt, Some(Rc::clone(buffer)))),
+            }
+        } else {
+            return Err(Error::from_message("Invalid state"));
         }
     }
 
@@ -205,50 +321,11 @@ impl ResultSet {
     }
 
     pub fn get_value(&mut self, col: impl Into<ColumnId>) -> Result<Option<ParamValue>> {
-        if self.pos.is_none() {
-            return Err(Error::from_message("Invalid state"));
-        }
-
-        let pos = self.pos.unwrap();
-        if pos >= self.results.len() {
-            return Err(Error::from_message("Invalid state"));
-        }
-
-        if self.results[pos].pos.is_none() {
-            return Err(Error::from_message("Invalid state"));
-        }
-
-        let row_pos = self.results[pos].pos.unwrap();
-        if row_pos >= self.results[pos].rows.len() {
-            return Err(Error::from_message("Invalid state"));
-        }
-
-        let row = &self.results[pos].rows[row_pos];
-        let col: ColumnId = col.into();
-        let col: usize = match col {
-            ColumnId::I32(i) => i.try_into().expect("Invalid column index"),
-            ColumnId::String(s) => {
-                let mut column_index: Option<usize> = None;
-                for i in 0..self.column_count()? {
-                    if self.column_name(i)?.unwrap_or_else(|| String::from("")) == s {
-                        column_index = Some(i);
-                        break;
-                    }
-                }
-                column_index.expect("Invalid column name")
-            }
-        };
-
-        if col >= self.results[pos].columns.len() {
-            return Err(Error::from_message("Invalid column index"));
-        }
-
-        let column = self.results[pos].columns[col].clone();
-        let buffer = row.buffers[col].clone();
+        let (fmt, buffer) = self.get_buffer(col)?;
 
         match buffer {
             None => Ok(None),
-            Some(buffer) => match column.fmt.datatype {
+            Some(buffer) => match fmt.datatype {
                 CS_BINARY_TYPE | CS_IMAGE_TYPE => {
                     Ok(Some(ParamValue::Blob(Rc::clone(&buffer).deref().clone())))
                 }
@@ -267,14 +344,14 @@ impl ResultSet {
                     let mut dstdata: Vec<u8> = vec![0u8; dstfmt.maxlength as usize];
                     let dstlen = self
                         .conn
-                        .convert(&column.fmt, &buffer, &dstfmt, &mut dstdata)?;
+                        .convert(&fmt, &buffer, &dstfmt, &mut dstdata)?;
                     Ok(Some(ParamValue::String(
                         String::from_utf8_lossy(&dstdata.as_slice()[0..dstlen]).to_string(),
                     )))
                 }
                 CS_DATE_TYPE | CS_TIME_TYPE | CS_DATETIME_TYPE | CS_DATETIME4_TYPE => {
-                    let datatype = column.fmt.datatype;
-                    let daterec = self.convert_date(&column.fmt, &buffer)?;
+                    let datatype = fmt.datatype;
+                    let daterec = self.convert_date(&fmt, &buffer)?;
                     Ok(Some(match datatype {
                         CS_DATE_TYPE => ParamValue::Date(
                             NaiveDate::from_ymd_opt(
@@ -328,7 +405,7 @@ impl ResultSet {
                     let mut dstdata: Vec<u8> = vec![0u8; dstfmt.maxlength as usize];
                     let dstlen = self
                         .conn
-                        .convert(&column.fmt, &buffer, &dstfmt, &mut dstdata)?;
+                        .convert(&fmt, &buffer, &dstfmt, &mut dstdata)?;
                     assert_eq!(dstlen, mem::size_of::<i32>());
                     unsafe {
                         let ptr: *const i32 = mem::transmute(buffer.as_ptr());
@@ -336,7 +413,7 @@ impl ResultSet {
                     }
                 }
                 CS_MONEY_TYPE | CS_MONEY4_TYPE | CS_DECIMAL_TYPE | CS_NUMERIC_TYPE => {
-                    if column.fmt.precision == CS_DEF_PREC && column.fmt.scale == 0 {
+                    if fmt.precision == CS_DEF_PREC && fmt.scale == 0 {
                         let dstfmt = CS_DATAFMT {
                             datatype: CS_BIGINT_TYPE,
                             maxlength: mem::size_of::<i64>() as i32,
@@ -348,7 +425,7 @@ impl ResultSet {
                         let mut dstdata: Vec<u8> = vec![0u8; dstfmt.maxlength as usize];
                         let dstlen =
                             self.conn
-                                .convert(&column.fmt, &buffer, &dstfmt, &mut dstdata)?;
+                                .convert(&fmt, &buffer, &dstfmt, &mut dstdata)?;
                         assert_eq!(dstlen, mem::size_of::<i64>());
                         unsafe {
                             let ptr: *const i64 = mem::transmute(dstdata.as_ptr());
@@ -368,7 +445,7 @@ impl ResultSet {
                         let mut dstdata: Vec<u8> = vec![0u8; dstfmt.maxlength as usize];
                         let dstlen =
                             self.conn
-                                .convert(&column.fmt, &buffer, &dstfmt, &mut dstdata)?;
+                                .convert(&fmt, &buffer, &dstfmt, &mut dstdata)?;
                         let s = String::from_utf8_lossy(&dstdata.as_slice()[0..dstlen]).to_string();
                         Ok(Some(ParamValue::Decimal(
                             Decimal::from_str_exact(&s)
@@ -392,10 +469,10 @@ impl ResultSet {
     }
 
     pub fn get_i64(&mut self, col: impl Into<ColumnId>) -> Result<Option<i64>> {
-        let buffer = self.get_buffer(col)?;
+        let (fmt, buffer) = self.get_buffer(col)?;
         match buffer {
             None => Ok(None),
-            Some((fmt, buffer)) => match fmt.datatype {
+            Some(buffer) => match fmt.datatype {
                 CS_LONG_TYPE => unsafe {
                     assert_eq!(buffer.len(), mem::size_of::<i64>());
                     let buf: *const i64 = mem::transmute(buffer.deref().as_ptr());
@@ -411,10 +488,10 @@ impl ResultSet {
     }
 
     pub fn get_i32(&mut self, col: impl Into<ColumnId>) -> Result<Option<i32>> {
-        let buffer = self.get_buffer(col)?;
+        let (fmt, buffer) = self.get_buffer(col)?;
         match buffer {
             None => Ok(None),
-            Some((fmt, buffer)) => match fmt.datatype {
+            Some(buffer) => match fmt.datatype {
                 CS_INT_TYPE => unsafe {
                     assert_eq!(buffer.len(), mem::size_of::<i32>());
                     let buf: *const i32 = mem::transmute(buffer.deref().as_ptr());
@@ -438,10 +515,10 @@ impl ResultSet {
     }
 
     pub fn get_f64(&mut self, col: impl Into<ColumnId>) -> Result<Option<f64>> {
-        let buffer = self.get_buffer(col)?;
+        let (fmt, buffer) = self.get_buffer(col)?;
         match buffer {
             None => Ok(None),
-            Some((fmt, buffer)) => match fmt.datatype {
+            Some(buffer) => match fmt.datatype {
                 CS_FLOAT_TYPE => unsafe {
                     assert_eq!(buffer.len(), mem::size_of::<f64>());
                     let buf: *const f64 = mem::transmute(buffer.deref().as_ptr());
@@ -462,10 +539,10 @@ impl ResultSet {
     }
 
     pub fn get_string(&mut self, col: impl Into<ColumnId>) -> Result<Option<String>> {
-        let buffer = self.get_buffer(col)?;
+        let (fmt, buffer) = self.get_buffer(col)?;
         match buffer {
             None => Ok(None),
-            Some((fmt, buffer)) => match fmt.datatype {
+            Some(buffer) => match fmt.datatype {
                 CS_CHAR_TYPE | CS_TEXT_TYPE => {
                     let value = String::from_utf8_lossy(&buffer);
                     Ok(Some(value.to_string()))
@@ -547,9 +624,10 @@ impl ResultSet {
     }
 
     pub fn get_blob(&mut self, col: impl Into<ColumnId>) -> Result<Option<Vec<u8>>> {
-        match self.get_buffer(col)? {
+        let (fmt, buffer) = self.get_buffer(col)?;
+        match buffer {
             None => Ok(None),
-            Some((fmt, buffer)) => match fmt.datatype {
+            Some(buffer) => match fmt.datatype {
                 CS_BINARY_TYPE | CS_IMAGE_TYPE => Ok(Some(buffer.deref().clone())),
                 CS_VARBINARY_TYPE => {
                     panic!("Not implemented yet");
@@ -574,9 +652,10 @@ impl ResultSet {
     }
 
     pub fn get_decimal(&mut self, col: impl Into<ColumnId>) -> Result<Option<Decimal>> {
-        match self.get_buffer(col)? {
+        let (fmt, buffer) = self.get_buffer(col)?;
+        match buffer {
             None => Ok(None),
-            Some((fmt, buffer)) => match fmt.datatype {
+            Some(buffer) => match fmt.datatype {
                 CS_INT_TYPE | CS_BIT_TYPE | CS_TINYINT_TYPE | CS_SMALLINT_TYPE
                 | CS_NUMERIC_TYPE | CS_MONEY_TYPE | CS_MONEY4_TYPE | CS_DECIMAL_TYPE
                 | CS_REAL_TYPE | CS_FLOAT_TYPE => {
@@ -630,15 +709,49 @@ impl ResultSet {
     }
 
     fn get_daterec(&mut self, col: impl Into<ColumnId>) -> Result<Option<CS_DATEREC>> {
-        let buffer = self.get_buffer(col)?;
+        let (fmt, buffer) = self.get_buffer(col)?;
         match buffer {
             None => Ok(None),
-            Some((fmt, buffer)) => Ok(Some(self.convert_date(&fmt, buffer.deref())?)),
+            Some(buffer) => Ok(Some(self.convert_date(&fmt, buffer.deref())?)),
         }
     }
 
-    pub fn status(&self) -> Option<i32> {
-        self.status
+    pub fn status(&mut self) -> Result<i32> {
+        if let None = self.pos {
+            if self.next_status_result().is_none() {
+                return Err(Error::from_message("Current ResultSet does not contain any status result"));
+            }
+        }
+
+        match self.results.get(self.pos.expect("Unexpected None value")) {
+            None => Err(Error::from_message("Invalid state")),
+            Some(results) => {
+                if let SybResult::Status(status) = results {
+                    Ok(*status)
+                } else {
+                    Err(Error::from_message("ResultSet does not currently point to a status result"))
+                }
+            }
+        }
+    }
+
+    pub fn update_count(&mut self) -> Result<u64> {
+        if let None = self.pos {
+            if self.next_update_count_result().is_none() {
+                return Err(Error::from_message("Current ResultSet does not contain any update count result"));
+            }
+        }
+
+        match self.results.get(self.pos.expect("Unexpected None value")) {
+            None => Err(Error::from_message("Invalid state")),
+            Some(results) => {
+                if let SybResult::UpdateCount(update_count) = results {
+                    Ok(*update_count)
+                } else {
+                    Err(Error::from_message("ResultSet does not currently point to an update count result"))
+                }
+            }
+        }
     }
 
     pub fn messages(&self) -> &Vec<Error> {
@@ -649,3 +762,4 @@ impl ResultSet {
         self.messages.first().cloned()
     }
 }
+

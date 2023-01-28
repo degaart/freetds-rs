@@ -2,7 +2,7 @@
 
 use crate::command::CommandArg;
 use crate::null::Null;
-use crate::result_set::{Column, ResultSet, Row, Rows};
+use crate::result_set::{Column, ResultSet, Row, Rows, SybResult};
 use crate::to_sql::ToSql;
 use crate::{command::Command, error::Error, property::Property, Result};
 use crate::{error, generate_query, parse_query, Statement};
@@ -489,8 +489,7 @@ impl Connection {
         command.command(CS_LANG_CMD, CommandArg::String(&text), CS_UNUSED)?;
         command.send()?;
 
-        let mut results: Vec<Rows> = Vec::new();
-        let mut status_result: Option<i32> = None;
+        let mut results: Vec<SybResult> = Vec::new();
         let mut failed = false;
         let mut errors: Vec<Error> = Vec::new();
         loop {
@@ -507,33 +506,30 @@ impl Connection {
             match res_type {
                 CS_ROW_RESULT => {
                     let row_result = Self::fetch_result(&mut command)?;
-                    results.push(row_result);
-                }
+                    results.push(SybResult::Rows(row_result));
+                },
                 CS_STATUS_RESULT => {
                     let row_result = Self::fetch_result(&mut command)?;
                     let row: &Vec<u8> = row_result.rows[0].buffers[0].as_ref().unwrap();
-                    let status: i32;
-                    unsafe {
+                    let status = unsafe {
                         let buf: *const i32 = mem::transmute(row.as_ptr());
-                        status = *buf;
-                    }
-
-                    match status_result {
-                        None => status_result = Some(status),
-                        Some(s) => {
-                            if s == 0 {
-                                status_result = Some(status);
-                            }
-                        }
+                        *buf
                     };
-                }
+                    results.push(SybResult::Status(status));
+                },
                 CS_COMPUTE_RESULT | CS_CURSOR_RESULT | CS_PARAM_RESULT => {
                     command.cancel(CS_CANCEL_CURRENT)?;
-                }
+                },
                 CS_CMD_FAIL => {
                     failed = true;
-                }
-                _ => { /* Do nothing, most notably, ignore CS_CMD_SUCCEED and CS_CMD_DONE */ }
+                },
+                CS_CMD_SUCCEED | CS_CMD_DONE => {
+                    let update_count = command.res_info::<i32>(CS_ROW_COUNT)?;
+                    if update_count != CS_NO_COUNT {
+                        results.push(SybResult::UpdateCount(update_count as u64));
+                    }
+                },
+                _ => {},
             }
         }
 
@@ -545,7 +541,7 @@ impl Connection {
             }
         }
 
-        Ok(ResultSet::new(self.clone(), results, status_result, errors))
+        Ok(ResultSet::new(self.clone(), results, errors))
     }
 
     pub fn execute_statement(&mut self, st: &Statement) -> Result<ResultSet> {
@@ -564,8 +560,7 @@ impl Connection {
         command.command(CS_LANG_CMD, CommandArg::String(&text), CS_UNUSED)?;
         command.send()?;
 
-        let mut results: Vec<Rows> = Vec::new();
-        let mut status_result: Option<i32> = None;
+        let mut results: Vec<SybResult> = Vec::new();
         let mut failed = false;
         let mut errors: Vec<Error> = Vec::new();
         loop {
@@ -582,33 +577,28 @@ impl Connection {
             match res_type {
                 CS_ROW_RESULT => {
                     let row_result = Self::fetch_result(&mut command)?;
-                    results.push(row_result);
-                }
+                    results.push(SybResult::Rows(row_result));
+                },
                 CS_STATUS_RESULT => {
                     let row_result = Self::fetch_result(&mut command)?;
                     let row: &Vec<u8> = row_result.rows[0].buffers[0].as_ref().unwrap();
-                    let status: i32;
-                    unsafe {
+                    let status = unsafe {
                         let buf: *const i32 = mem::transmute(row.as_ptr());
-                        status = *buf;
-                    }
-
-                    match status_result {
-                        None => status_result = Some(status),
-                        Some(s) => {
-                            if s == 0 {
-                                status_result = Some(status);
-                            }
-                        }
+                        *buf
                     };
-                }
+                    results.push(SybResult::Status(status));
+                },
                 CS_COMPUTE_RESULT | CS_CURSOR_RESULT | CS_PARAM_RESULT => {
                     command.cancel(CS_CANCEL_CURRENT)?;
-                }
+                },
                 CS_CMD_FAIL => {
                     failed = true;
-                }
-                _ => { /* Do nothing, most notably, ignore CS_CMD_SUCCEED and CS_CMD_DONE */ }
+                },
+                CS_CMD_SUCCEED | CS_CMD_DONE => {
+                    let update_count = command.res_info::<u64>(CS_ROW_COUNT)?;
+                    results.push(SybResult::UpdateCount(update_count));
+                },
+                _ => {},
             }
         }
 
@@ -620,7 +610,7 @@ impl Connection {
             }
         }
 
-        Ok(ResultSet::new(self.clone(), results, status_result, errors))
+        Ok(ResultSet::new(self.clone(), results, errors))
     }
 
     fn fetch_result(cmd: &mut Command) -> Result<Rows> {
@@ -1133,19 +1123,40 @@ mod tests {
 
         let res = conn.execute("sp_locklogin test123, 'lock'", &[]);
         assert!(res.is_ok());
-        let res = res.unwrap();
-        assert!(res.status().is_some());
+
+        let mut res = res.unwrap();
+        assert!(res.status().is_ok());
         assert_eq!(0, res.status().unwrap());
 
         let res = conn.execute("sp_locklogin all_your_base_are_belong_to_us, 'lock'", &[]);
         assert!(res.is_ok());
-        let res = res.unwrap();
-        assert!(res.status().is_some());
+
+        let mut res = res.unwrap();
+        assert!(res.status().is_ok());
         assert_eq!(1, res.status().unwrap());
         assert_eq!(
             "No such account -- nothing changed.",
             res.error().unwrap().desc()
         );
+    }
+
+    #[test]
+    fn test_update_count_result() {
+        let mut conn = connect();
+
+        conn.execute("create table #freetds_test(idx int not null, val varchar(64) not null, primary key(idx))", &[])
+            .unwrap();
+        conn.execute("insert into #freetds_test(idx, val) values(1, 'A')", &[]).unwrap();
+        conn.execute("insert into #freetds_test(idx, val) values(2, 'B')", &[]).unwrap();
+        conn.execute("insert into #freetds_test(idx, val) values(3, 'C')", &[]).unwrap();
+        conn.execute("insert into #freetds_test(idx, val) values(4, 'D')", &[]).unwrap();
+        conn.execute("insert into #freetds_test(idx, val) values(5, 'E')", &[]).unwrap();
+        conn.execute("insert into #freetds_test(idx, val) values(6, 'F')", &[]).unwrap();
+
+        let mut rs = conn.execute("update #freetds_test set val=val+'_'", &[]).unwrap();
+        let update_count = rs.update_count();
+        assert!(update_count.is_ok());
+        assert_eq!(6, update_count.unwrap());
     }
 
     #[test]
@@ -1245,4 +1256,48 @@ mod tests {
             msg.lock().unwrap().borrow().as_ref().unwrap()
         );
     }
+
+    #[test]
+    fn test_multiple_results() {
+        let mut conn = connect();
+
+        conn.execute("use tempdb", &[]).unwrap();
+        conn.execute("if exists(select * from tempdb..sysobjects where type='P' and name='freetds_003') drop procedure freetds_003", &[]).unwrap();
+        conn.execute("
+            create procedure freetds_003 as begin
+                create table #freetds_002(val int)
+                
+                insert into #freetds_002(val) values(1)
+                insert into #freetds_002(val) values(2)
+                insert into #freetds_002(val) values(3)
+                
+                update #freetds_002 set val = val + 1
+                
+                select val from #freetds_002
+            end
+        ", &[])
+        .unwrap();
+
+        let mut rs = conn.execute("freetds_003", &[]).unwrap();
+        assert!(rs.is_rows());
+        
+        assert!(rs.next());
+        assert_eq!(Some(2), rs.get_i32(0).unwrap());
+        assert!(rs.next());
+        assert_eq!(Some(3), rs.get_i32(0).unwrap());
+        assert!(rs.next());
+        assert_eq!(Some(4), rs.get_i32(0).unwrap());
+        assert!(!rs.next());
+        
+        assert!(rs.next_results());
+        assert!(rs.is_update_count());
+        assert_eq!(3, rs.update_count().unwrap());
+
+        assert!(rs.next_results());
+        assert!(rs.is_status());
+        assert_eq!(0, rs.status().unwrap());
+
+        assert!(!rs.next_results());
+    }
+
 }
