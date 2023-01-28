@@ -11,7 +11,7 @@ pub mod to_sql;
 pub mod util;
 
 pub use column_id::ColumnId;
-pub use connection::Connection;
+pub use connection::{Connection,TdsVersion};
 pub use error::Error;
 pub use null::NULL;
 pub use result_set::ResultSet;
