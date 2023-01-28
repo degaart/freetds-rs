@@ -163,19 +163,22 @@ where
 
 #[cfg(test)]
 mod tests {
-    use crate::{parse_query, Connection, TextPiece};
+    use crate::{parse_query, Connection, TextPiece, connection::TdsVersion};
+    const SERVER: &str = "***REMOVED***";
 
     fn connect() -> Connection {
-        let mut conn = Connection::new();
-        conn.set_client_charset("UTF-8").unwrap();
-        conn.set_username("sa").unwrap();
-        conn.set_password("").unwrap();
-        conn.set_database("master").unwrap();
-        conn.set_tds_version_50().unwrap();
-        conn.set_login_timeout(5).unwrap();
-        conn.set_timeout(5).unwrap();
-        conn.connect("***REMOVED***:2025").unwrap();
-        conn
+        Connection::builder()
+            .host(SERVER)
+            .port(2025)
+            .client_charset("UTF-8")
+            .username("sa")
+            .password("")
+            .database("master")
+            .tds_version(TdsVersion::Tds50)
+            .login_timeout(5)
+            .timeout(5)
+            .connect()
+            .unwrap()
     }
 
     #[test]

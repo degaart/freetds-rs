@@ -12,7 +12,7 @@ use once_cell::sync::OnceCell;
 use std::collections::HashMap;
 use std::ffi::{c_void, CStr};
 use std::rc::Rc;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::{ffi::CString, mem, ptr};
 
 type DiagnosticsMap = HashMap<usize, Box<dyn Fn(Error) + Send>>;
@@ -216,6 +216,68 @@ impl CSConnection {
             }
         }
     }
+
+    fn diag_clear(&mut self) {
+        self.messages.lock().unwrap().clear();
+    }
+
+    fn diag_get(&mut self) -> MutexGuard<Vec<Error>> {
+        self.messages.lock().unwrap()
+    }
+
+    fn get_error(&mut self) -> Option<Error> {
+        self.diag_get()
+            .iter()
+            .find(|e| e.severity.unwrap_or(i32::MAX) > 10)
+            .cloned()
+    }
+
+    fn set_prop(&mut self, property: u32, value: Property) -> Result<()> {
+        self.diag_clear();
+        unsafe {
+            let ret = match value {
+                Property::I32(mut i) => ct_con_props(
+                    self.conn_handle,
+                    CS_SET,
+                    property as CS_INT,
+                    std::mem::transmute(&mut i),
+                    mem::size_of::<i32>() as i32,
+                    ptr::null_mut(),
+                ),
+                Property::U32(mut i) => ct_con_props(
+                    self.conn_handle,
+                    CS_SET,
+                    property as CS_INT,
+                    std::mem::transmute(&mut i),
+                    mem::size_of::<u32>() as i32,
+                    ptr::null_mut(),
+                ),
+                Property::String(s) => {
+                    let s1 = CString::new(s)?;
+                    ct_con_props(
+                        self.conn_handle,
+                        CS_SET,
+                        property as CS_INT,
+                        std::mem::transmute(s1.as_ptr()),
+                        s.len() as i32,
+                        ptr::null_mut(),
+                    )
+                }
+                _ => {
+                    return Err(Error::from_message("Invalid argument"));
+                }
+            };
+
+            if ret == CS_SUCCEED {
+                Ok(())
+            } else {
+                Err(self
+                    .get_error()
+                    .unwrap_or_else(|| Error::from_message("ct_con_props failed")))
+            }
+        }
+    }
+
 }
 
 impl Drop for CSConnection {
@@ -241,161 +303,177 @@ impl Drop for CSConnection {
     }
 }
 
+#[derive(Clone,Copy)]
+pub enum TdsVersion {
+    Auto,
+    Tds40,
+    Tds42,
+    Tds495,
+    Tds50,
+    Tds70,
+    Tds72,
+    Tds73,
+    Tds74,
+}
+
+#[derive(Default,Clone)]
+pub struct ConnectionBuilder {
+    host: Option<String>,
+    port: Option<u16>,
+    server_name: Option<String>,
+    client_charset: Option<String>,
+    username: Option<String>,
+    password: Option<String>,
+    database: Option<String>,
+    tds_version: Option<TdsVersion>,
+    login_timeout: Option<i32>,
+    timeout: Option<i32>,
+}
+
+impl ConnectionBuilder {
+    pub fn server_name(mut self, server: &str) -> Self {
+        self.server_name = Some(server.to_string());
+        self
+    }
+
+    pub fn host(mut self, host: &str) -> Self {
+        self.host = Some(host.to_string());
+        self
+    }
+
+    pub fn port(mut self, port: u16) -> Self {
+        self.port = Some(port);
+        self
+    }
+
+    pub fn client_charset(mut self, charset: &str) -> Self {
+        self.client_charset = Some(charset.to_string());
+        self
+    }
+
+    pub fn username(mut self, username: &str) -> Self {
+        self.username = Some(username.to_string());
+        self
+    }
+
+    pub fn password(mut self, password: &str) -> Self {
+        self.password = Some(password.to_string());
+        self
+    }
+
+    pub fn database(mut self, database: &str) -> Self {
+        self.database = Some(database.to_string());
+        self
+    }
+
+    pub fn tds_version(mut self, version: TdsVersion) -> Self {
+        self.tds_version = Some(version);
+        self
+    }
+
+    pub fn login_timeout(mut self, timeout: i32) -> Self {
+        self.login_timeout = Some(timeout);
+        self
+    }
+
+    pub fn timeout(mut self, timeout: i32) -> Self {
+        self.timeout = Some(timeout);
+        self
+    }
+
+    pub fn connect(&self) -> Result<Connection> {
+        let mut conn = CSConnection::new();
+        conn.diag_clear();
+
+        if let Some(charset) = self.client_charset.as_ref() {
+            conn.set_prop(CS_CLIENTCHARSET, Property::String(charset))?;
+        }
+
+        if let Some(username) = self.username.as_ref() {
+            conn.set_prop(CS_USERNAME, Property::String(username))?;
+        }
+
+        if let Some(password) = self.password.as_ref() {
+            conn.set_prop(CS_PASSWORD, Property::String(password))?;
+        }
+
+        if let Some(database) = self.database.as_ref() {
+            conn.set_prop(CS_DATABASE, Property::String(database))?;
+        }
+
+        if let Some(tds_version) = self.tds_version.as_ref() {
+            let tdsver = match tds_version {
+                TdsVersion::Auto => CS_TDS_AUTO,
+                TdsVersion::Tds40 => CS_TDS_40,
+                TdsVersion::Tds42 => CS_TDS_42,
+                TdsVersion::Tds495 => CS_TDS_495,
+                TdsVersion::Tds50 => CS_TDS_50,
+                TdsVersion::Tds70 => CS_TDS_70,
+                TdsVersion::Tds72 => CS_TDS_72,
+                TdsVersion::Tds73 => CS_TDS_73,
+                TdsVersion::Tds74 => CS_TDS_74,
+            };
+            conn.set_prop(CS_TDS_VERSION, Property::U32(tdsver))?;
+        }
+
+        if let Some(login_timeout) = self.login_timeout.as_ref() {
+            conn.set_prop(CS_LOGIN_TIMEOUT, Property::I32(*login_timeout))?;
+        }
+
+        if let Some(timeout) = self.timeout.as_ref() {
+            conn.set_prop(CS_TIMEOUT, Property::I32(*timeout))?;
+        }
+
+        let server_name = match self.server_name.as_ref() {
+            Some(server_name) => {
+                server_name.clone()
+            },
+            None => {
+                if let Some(host) = self.host.as_ref() {
+                    format!("{}:{}",
+                        host,
+                        self.port.as_ref().unwrap_or(&5000))
+                } else {
+                    return Err(Error::from_message("Server host address not configured"));
+                }
+            },
+        };
+
+        let cserver_name = CString::new(server_name)?;
+        let ret = unsafe {
+            ct_connect(
+                conn.conn_handle,
+                mem::transmute(cserver_name.as_ptr()),
+                CS_NULLTERM,
+            )
+        };
+        if ret != CS_SUCCEED {
+            return Err(conn
+                        .get_error()
+                        .unwrap_or_else(|| Error::from_failure("ct_connect")))
+        }
+
+        Ok(Connection::new(conn))
+    }
+}
+
 #[derive(Clone)]
 pub struct Connection {
     pub(crate) conn: Arc<Mutex<CSConnection>>,
-    connected: bool,
 }
 
 impl Connection {
-    pub fn new() -> Self {
-        let conn = Arc::new(Mutex::new(CSConnection::new()));
-        let conn_guard = conn.lock().unwrap();
-        drop(conn_guard);
+    fn new(conn: CSConnection) -> Self {
         Self {
-            conn,
-            connected: false,
+            conn: Arc::new(Mutex::new(conn))
         }
     }
 
-    pub fn set_client_charset(&mut self, charset: impl AsRef<str>) -> Result<()> {
-        self.set_props(CS_CLIENTCHARSET, Property::String(charset.as_ref()))
-    }
-
-    pub fn set_username(&mut self, username: impl AsRef<str>) -> Result<()> {
-        self.set_props(CS_USERNAME, Property::String(username.as_ref()))
-    }
-
-    pub fn set_password(&mut self, password: impl AsRef<str>) -> Result<()> {
-        self.set_props(CS_PASSWORD, Property::String(password.as_ref()))
-    }
-
-    pub fn set_database(&mut self, database: impl AsRef<str>) -> Result<()> {
-        self.set_props(CS_DATABASE, Property::String(database.as_ref()))
-    }
-
-    pub fn set_tds_version_auto(&mut self) -> Result<()> {
-        self.set_props(CS_TDS_VERSION, Property::U32(CS_TDS_AUTO))
-    }
-
-    pub fn set_tds_version_40(&mut self) -> Result<()> {
-        self.set_props(CS_TDS_VERSION, Property::U32(CS_TDS_40))
-    }
-
-    pub fn set_tds_version_42(&mut self) -> Result<()> {
-        self.set_props(CS_TDS_VERSION, Property::U32(CS_TDS_42))
-    }
-
-    pub fn set_tds_version_495(&mut self) -> Result<()> {
-        self.set_props(CS_TDS_VERSION, Property::U32(CS_TDS_495))
-    }
-
-    pub fn set_tds_version_50(&mut self) -> Result<()> {
-        self.set_props(CS_TDS_VERSION, Property::U32(CS_TDS_50))
-    }
-
-    pub fn set_tds_version_70(&mut self) -> Result<()> {
-        self.set_props(CS_TDS_VERSION, Property::U32(CS_TDS_70))
-    }
-
-    pub fn set_tds_version_71(&mut self) -> Result<()> {
-        self.set_props(CS_TDS_VERSION, Property::U32(CS_TDS_71))
-    }
-
-    pub fn set_tds_version_72(&mut self) -> Result<()> {
-        self.set_props(CS_TDS_VERSION, Property::U32(CS_TDS_72))
-    }
-
-    pub fn set_tds_version_73(&mut self) -> Result<()> {
-        self.set_props(CS_TDS_VERSION, Property::U32(CS_TDS_73))
-    }
-
-    pub fn set_tds_version_74(&mut self) -> Result<()> {
-        self.set_props(CS_TDS_VERSION, Property::U32(CS_TDS_74))
-    }
-
-    pub fn set_login_timeout(&mut self, timeout: i32) -> Result<()> {
-        self.set_props(CS_LOGIN_TIMEOUT, Property::I32(timeout))
-    }
-
-    pub fn set_timeout(&mut self, timeout: i32) -> Result<()> {
-        self.set_props(CS_TIMEOUT, Property::I32(timeout))
-    }
-
-    fn set_props(&mut self, property: u32, value: Property) -> Result<()> {
-        self.diag_clear();
-        unsafe {
-            let ret = match value {
-                Property::I32(mut i) => ct_con_props(
-                    self.conn.lock().unwrap().conn_handle,
-                    CS_SET,
-                    property as CS_INT,
-                    std::mem::transmute(&mut i),
-                    mem::size_of::<i32>() as i32,
-                    ptr::null_mut(),
-                ),
-                Property::U32(mut i) => ct_con_props(
-                    self.conn.lock().unwrap().conn_handle,
-                    CS_SET,
-                    property as CS_INT,
-                    std::mem::transmute(&mut i),
-                    mem::size_of::<u32>() as i32,
-                    ptr::null_mut(),
-                ),
-                Property::String(s) => {
-                    let s1 = CString::new(s)?;
-                    ct_con_props(
-                        self.conn.lock().unwrap().conn_handle,
-                        CS_SET,
-                        property as CS_INT,
-                        std::mem::transmute(s1.as_ptr()),
-                        s.len() as i32,
-                        ptr::null_mut(),
-                    )
-                }
-                _ => {
-                    return Err(Error::from_message("Invalid argument"));
-                }
-            };
-
-            if ret == CS_SUCCEED {
-                Ok(())
-            } else {
-                Err(self
-                    .get_error()
-                    .unwrap_or_else(|| Error::from_message("ct_con_props failed")))
-            }
-        }
-    }
-
-    pub fn connect(&mut self, server_name: impl AsRef<str>) -> Result<()> {
-        if self.connected {
-            return Err(Error::from_message("Invalid connection state"));
-        }
-
-        self.diag_clear();
-        let server_name = CString::new(server_name.as_ref())?;
-        let ret;
-        unsafe {
-            ret = ct_connect(
-                self.conn.lock().unwrap().conn_handle,
-                mem::transmute(server_name.as_ptr()),
-                CS_NULLTERM,
-            );
-        }
-        if ret == CS_SUCCEED {
-            self.connected = true;
-            Ok(())
-        } else {
-            let err = self.get_error();
-            Err(err.unwrap_or_else(|| Error::from_message("ct_connect failed")))
-        }
+    pub fn builder() -> ConnectionBuilder {
+        ConnectionBuilder::default()
     }
 
     pub fn execute(&mut self, text: impl AsRef<str>, params: &[&dyn ToSql]) -> Result<ResultSet> {
-        if !self.connected {
-            return Err(Error::from_message("Invalid connection state"));
-        }
         let parsed_query = parse_query(text.as_ref());
         if parsed_query.params.len() != params.len() {
             return Err(Error::from_message("Invalid parameter count"));
@@ -467,10 +545,6 @@ impl Connection {
     }
 
     pub fn execute_statement(&mut self, st: &Statement) -> Result<ResultSet> {
-        if !self.connected {
-            return Err(Error::from_message("Invalid connection state"));
-        }
-
         let params: Vec<&dyn ToSql> = st
             .params
             .iter()
@@ -635,10 +709,6 @@ impl Connection {
     }
 
     pub fn is_connected(&mut self) -> bool {
-        if !self.connected {
-            return false;
-        }
-
         let ret;
         let status: i32 = Default::default();
         self.diag_clear();
@@ -740,17 +810,11 @@ impl Connection {
     }
 }
 
-impl Default for Connection {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 unsafe impl Send for Connection {}
 
 #[cfg(test)]
 mod tests {
-    use super::Connection;
+    use super::*;
     use crate::to_sql::ToSql;
     use crate::{generate_query, parse_query, ParamValue, Statement};
     use chrono::{NaiveDate, NaiveTime};
@@ -763,16 +827,18 @@ mod tests {
     const SERVER: &str = "***REMOVED***";
 
     fn connect() -> Connection {
-        let mut conn = Connection::new();
-        conn.set_client_charset("UTF-8").unwrap();
-        conn.set_username("sa").unwrap();
-        conn.set_password("").unwrap();
-        conn.set_database("master").unwrap();
-        conn.set_tds_version_50().unwrap();
-        conn.set_login_timeout(5).unwrap();
-        conn.set_timeout(5).unwrap();
-        conn.connect(&format!("{}:2025", SERVER)).unwrap();
-        conn
+        Connection::builder()
+            .host(SERVER)
+            .port(2025)
+            .client_charset("UTF-8")
+            .username("sa")
+            .password("")
+            .database("master")
+            .tds_version(TdsVersion::Tds50)
+            .login_timeout(5)
+            .timeout(5)
+            .connect()
+            .unwrap()
     }
 
     #[test]
@@ -1098,29 +1164,35 @@ mod tests {
     #[test]
     fn test_database() {
         /* Test connecting correctly sets the database */
-        let mut conn = Connection::new();
-        conn.set_client_charset("UTF-8").unwrap();
-        conn.set_username("sa").unwrap();
-        conn.set_password("").unwrap();
-        conn.set_database("master").unwrap();
-        conn.set_tds_version_50().unwrap();
-        conn.set_login_timeout(5).unwrap();
-        conn.set_timeout(5).unwrap();
-        conn.connect(&format!("{}:2025", SERVER)).unwrap();
+        let mut conn = Connection::builder()
+            .host(SERVER)
+            .port(2025)
+            .client_charset("UTF-8")
+            .username("sa")
+            .password("")
+            .database("master")
+            .tds_version(TdsVersion::Tds50)
+            .login_timeout(5)
+            .timeout(5)
+            .connect()
+            .unwrap();
 
         let mut rs = conn.execute("select db_name()", &[]).unwrap();
         assert!(rs.next());
         assert_eq!(Some(String::from("master")), rs.get_string(0).unwrap());
 
-        let mut conn = Connection::new();
-        conn.set_client_charset("UTF-8").unwrap();
-        conn.set_username("sa").unwrap();
-        conn.set_password("").unwrap();
-        conn.set_database("sybsystemprocs").unwrap();
-        conn.set_tds_version_50().unwrap();
-        conn.set_login_timeout(5).unwrap();
-        conn.set_timeout(5).unwrap();
-        conn.connect(&format!("{}:2025", SERVER)).unwrap();
+        let mut conn = Connection::builder()
+            .host(SERVER)
+            .port(2025)
+            .client_charset("UTF-8")
+            .username("sa")
+            .password("")
+            .database("sybsystemprocs")
+            .tds_version(TdsVersion::Tds50)
+            .login_timeout(5)
+            .timeout(5)
+            .connect()
+            .unwrap();
 
         let mut rs = conn.execute("select db_name()", &[]).unwrap();
         assert!(rs.next());
@@ -1132,15 +1204,7 @@ mod tests {
 
     #[test]
     fn test_db_name() {
-        let mut conn = Connection::new();
-        conn.set_client_charset("UTF-8").unwrap();
-        conn.set_username("sa").unwrap();
-        conn.set_password("").unwrap();
-        conn.set_database("master").unwrap();
-        conn.set_tds_version_50().unwrap();
-        conn.set_login_timeout(5).unwrap();
-        conn.set_timeout(5).unwrap();
-        conn.connect(&format!("{}:2025", SERVER)).unwrap();
+        let mut conn = connect();
 
         assert_eq!(String::from("master"), conn.db_name().unwrap());
         conn.execute("use sybsystemprocs", &[]).unwrap();
