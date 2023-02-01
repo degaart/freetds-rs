@@ -516,6 +516,9 @@ impl Connection {
                         *buf
                     };
                     results.push(SybResult::Status(status));
+                    if status != 0 {
+                        failed = true;
+                    }
                 },
                 CS_COMPUTE_RESULT | CS_CURSOR_RESULT | CS_PARAM_RESULT => {
                     command.cancel(CS_CANCEL_CURRENT)?;
@@ -586,6 +589,9 @@ impl Connection {
                         let buf: *const i32 = mem::transmute(row.as_ptr());
                         *buf
                     };
+                    if status != 0 {
+                        failed = true;
+                    }
                     results.push(SybResult::Status(status));
                 },
                 CS_COMPUTE_RESULT | CS_CURSOR_RESULT | CS_PARAM_RESULT => {
@@ -962,6 +968,8 @@ mod tests {
     #[test]
     fn test_execution_failure() {
         let mut conn = connect();
+
+        /* Simple SQL syntax error */
         let text = "selecta \
                 'aaaa', \
                 2, 5000000000, \
@@ -974,6 +982,12 @@ mod tests {
         let ret = conn.execute(text, &[]);
         assert!(ret.is_err());
         assert_eq!("Incorrect syntax near '('.", ret.err().unwrap().desc());
+
+        /* Procedure call where the server spits out an error */
+        let text = "sp_bindcache NonExistent,NonExistent";
+        let ret = conn.execute(text, &[]);
+        assert!(ret.is_err());
+        assert_eq!("Specified named cache does not exist.", ret.err().unwrap().desc());
     }
 
     #[test]
@@ -1129,15 +1143,8 @@ mod tests {
         assert_eq!(0, res.status().unwrap());
 
         let res = conn.execute("sp_locklogin all_your_base_are_belong_to_us, 'lock'", &[]);
-        assert!(res.is_ok());
-
-        let mut res = res.unwrap();
-        assert!(res.status().is_ok());
-        assert_eq!(1, res.status().unwrap());
-        assert_eq!(
-            "No such account -- nothing changed.",
-            res.error().unwrap().desc()
-        );
+        assert!(res.is_err());
+        assert_eq!("No such account -- nothing changed.", res.err().unwrap().desc());
     }
 
     #[test]
