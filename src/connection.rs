@@ -822,7 +822,7 @@ mod tests {
     use std::cell::RefCell;
     use std::sync::{Arc, Mutex};
     use std::thread;
-    use std::time::Duration;
+    use std::time::Instant;
 
     const SERVER: &str = "***REMOVED***";
 
@@ -1111,19 +1111,23 @@ mod tests {
     fn test_multiple_threads() {
         let mut conn = connect();
         let t0 = thread::spawn(move || {
-            thread::sleep(Duration::from_millis(500));
-            let mut rs = conn.execute("select getdate()", &[]).unwrap();
-            while rs.next() {
-                println!("[0] {}", rs.get_string(0).unwrap().unwrap());
+            let start = Instant::now();
+            while Instant::now().duration_since(start).as_millis() < 5000 {
+                let mut rs = conn.execute("select getdate()", &[]).unwrap();
+                while rs.next() {
+                    println!("[0] {}", rs.get_string(0).unwrap().unwrap());
+                }
             }
         });
 
         let mut conn = connect();
         let t1 = thread::spawn(move || {
-            thread::sleep(Duration::from_millis(500));
-            let mut rs = conn.execute("select getdate()", &[]).unwrap();
-            while rs.next() {
-                println!("[1] {}", rs.get_string(0).unwrap().unwrap());
+            let start = Instant::now();
+            while Instant::now().duration_since(start).as_millis() < 5000 {
+                let mut rs = conn.execute("select getdate()", &[]).unwrap();
+                while rs.next() {
+                    println!("[1] {}", rs.get_string(0).unwrap().unwrap());
+                }
             }
         });
 
