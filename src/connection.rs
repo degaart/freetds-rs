@@ -1,4 +1,5 @@
 #![allow(clippy::useless_transmute)]
+#![allow(unused)]
 
 use crate::command::CommandArg;
 use crate::null::Null;
@@ -6,130 +7,17 @@ use crate::result_set::{Column, ResultSet, Row, Rows, SybResult};
 use crate::to_sql::ToSql;
 use crate::{command::Command, error::Error, property::Property, Result};
 use crate::{error, generate_query, parse_query, Statement};
+use anyhow::bail;
 use freetds_sys::*;
 use log::debug;
 use once_cell::sync::OnceCell;
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::{c_void, CStr};
+use std::mem::MaybeUninit;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::{ffi::CString, mem, ptr};
-
-type DiagnosticsMap = HashMap<usize, Box<dyn Fn(Error) + Send>>;
-
-/* TODO: Investigate using cs_config(CS_USERDATA) and a Pin<Mutex<T>> */
-struct Diagnostics {
-    handlers: Mutex<DiagnosticsMap>,
-}
-
-impl Diagnostics {
-    fn new() -> Self {
-        Diagnostics {
-            handlers: Mutex::new(HashMap::new()),
-        }
-    }
-
-    fn set_handler(ctx: *const CS_CONTEXT, handler: Box<dyn Fn(Error) + Send>) {
-        DIAGNOSTICS
-            .get_or_init(Diagnostics::new)
-            .handlers
-            .lock()
-            .unwrap()
-            .insert(ctx as usize, handler);
-    }
-
-    fn remove_handler(ctx: *const CS_CONTEXT) {
-        if let Some(diag) = DIAGNOSTICS.get() {
-            diag.handlers.lock().unwrap().remove(&(ctx as usize));
-        }
-    }
-}
-
-static DIAGNOSTICS: OnceCell<Diagnostics> = OnceCell::new();
-
-extern "C" fn csmsg_callback(ctx: *const CS_CONTEXT, msg: *const CS_CLIENTMSG) -> CS_RETCODE {
-    let key = ctx as usize;
-    let handlers = DIAGNOSTICS
-        .get_or_init(Diagnostics::new)
-        .handlers
-        .lock()
-        .unwrap();
-
-    let handler = handlers
-        .get(&key)
-        .expect("context not found in Diagnostics::handlers");
-
-    unsafe {
-        handler(Error {
-            type_: error::Type::Cs,
-            code: Some((*msg).msgnumber),
-            desc: CStr::from_ptr((*msg).msgstring.as_ptr())
-                .to_string_lossy()
-                .trim_end()
-                .to_string(),
-            severity: Some((*msg).severity),
-        });
-    }
-    CS_SUCCEED
-}
-
-extern "C" fn clientmsg_callback(
-    ctx: *const CS_CONTEXT,
-    _conn: *const CS_CONNECTION,
-    msg: *const CS_CLIENTMSG,
-) -> CS_RETCODE {
-    let key = ctx as usize;
-    let handlers = DIAGNOSTICS
-        .get_or_init(Diagnostics::new)
-        .handlers
-        .lock()
-        .unwrap();
-
-    let handler = handlers
-        .get(&key)
-        .expect("context not found in Diagnostics::handlers");
-    unsafe {
-        handler(Error {
-            type_: error::Type::Client,
-            code: Some((*msg).msgnumber),
-            desc: CStr::from_ptr((*msg).msgstring.as_ptr())
-                .to_string_lossy()
-                .trim_end()
-                .to_string(),
-            severity: Some((*msg).severity),
-        });
-    }
-    CS_SUCCEED
-}
-
-extern "C" fn servermsg_callback(
-    ctx: *const CS_CONTEXT,
-    _conn: *const CS_CONNECTION,
-    msg: *const CS_SERVERMSG,
-) -> CS_RETCODE {
-    let key = ctx as usize;
-    let handlers = DIAGNOSTICS
-        .get_or_init(Diagnostics::new)
-        .handlers
-        .lock()
-        .unwrap();
-
-    let handler = handlers
-        .get(&key)
-        .expect("context not found in Diagnostics::handlers");
-    unsafe {
-        handler(Error {
-            type_: error::Type::Server,
-            code: Some((*msg).msgnumber),
-            desc: CStr::from_ptr((*msg).text.as_ptr())
-                .to_string_lossy()
-                .trim_end()
-                .to_string(),
-            severity: Some((*msg).severity),
-        });
-    }
-    CS_SUCCEED
-}
 
 #[derive(Debug, Clone, Default)]
 struct Bind {
@@ -138,47 +26,37 @@ struct Bind {
     indicator: i16,
 }
 
-type MessageCallback = Box<dyn Fn(&Error) -> bool + Send>;
+type MessageCallback = Box<dyn FnMut(&Error) -> bool>;
 
+/*
+ * This struct is just for RAII of the inner handles
+ * The refcells are just for avoiding UB, we could
+ * probably remove them once we are sure everything
+ * work ok
+ */
 pub(crate) struct CSConnection {
     pub ctx_handle: *mut CS_CONTEXT,
     pub conn_handle: *mut CS_CONNECTION,
-    pub messages: Arc<Mutex<Vec<Error>>>,
-    pub msg_callback: Arc<Mutex<Option<MessageCallback>>>,
+    pub messages: Vec<Error>,
+    pub msg_callback: Option<MessageCallback>,
 }
 
+unsafe impl Send for CSConnection {}
+
 impl CSConnection {
-    pub fn new() -> Self {
+    pub fn new() -> Rc<RefCell<Self>> {
         unsafe {
             let mut ctx_handle: *mut CS_CONTEXT = ptr::null_mut();
             let ret = cs_ctx_alloc(CS_VERSION_125, &mut ctx_handle);
             assert_eq!(CS_SUCCEED, ret);
 
-            let messages = Arc::new(Mutex::new(Vec::new()));
-            let msg_callback = Arc::new(Mutex::new(None::<Box<dyn Fn(&Error) -> bool + Send>>));
-
-            let diag_messages = Arc::clone(&messages);
-            let diag_callback = Arc::clone(&msg_callback);
-            Diagnostics::set_handler(
-                ctx_handle,
-                Box::new(move |msg| {
-                    let callback = diag_callback.lock().unwrap();
-                    if let Some(f) = callback.as_ref() {
-                        if !f(&msg) {
-                            return;
-                        }
-                    }
-
-                    diag_messages.lock().unwrap().push(msg);
-                }),
-            );
-
+            let messages = Vec::new();
             let ret = cs_config(
                 ctx_handle,
                 CS_SET,
                 CS_MESSAGE_CB,
-                csmsg_callback as *mut c_void,
-                mem::size_of_val(&csmsg_callback) as i32,
+                Self::csmsg_callback as *mut c_void,
+                mem::size_of_val(&Self::csmsg_callback) as i32,
                 ptr::null_mut(),
             );
             assert_eq!(CS_SUCCEED, ret);
@@ -195,7 +73,7 @@ impl CSConnection {
                 conn_handle,
                 CS_SET,
                 CS_CLIENTMSG_CB,
-                clientmsg_callback as *mut c_void,
+                Self::clientmsg_callback as *mut c_void,
             );
             assert_eq!(CS_SUCCEED, ret);
 
@@ -204,25 +82,31 @@ impl CSConnection {
                 conn_handle,
                 CS_SET,
                 CS_SERVERMSG_CB,
-                servermsg_callback as *mut c_void,
+                Self::servermsg_callback as *mut c_void,
             );
             assert_eq!(CS_SUCCEED, ret);
 
-            Self {
+            let result = Rc::new(RefCell::new(Self {
                 ctx_handle,
                 conn_handle,
                 messages,
-                msg_callback,
-            }
+                msg_callback: None,
+            }));
+
+            let ptr: *const CSConnection = { &*result.borrow() };
+            Self::set_ctx_property(ctx_handle, CS_USERDATA, &ptr)
+                .expect("cs_config failed");
+
+            Rc::clone(&result)
         }
     }
 
     fn diag_clear(&mut self) {
-        self.messages.lock().unwrap().clear();
+        self.messages.clear();
     }
 
-    fn diag_get(&mut self) -> MutexGuard<Vec<Error>> {
-        self.messages.lock().unwrap()
+    fn diag_get(&mut self) -> &Vec<Error> {
+        &self.messages
     }
 
     fn get_error(&mut self) -> Option<Error> {
@@ -232,6 +116,7 @@ impl CSConnection {
             .cloned()
     }
 
+    #[deprecated]
     fn set_prop(&mut self, property: u32, value: Property) -> Result<()> {
         self.diag_clear();
         unsafe {
@@ -278,12 +163,170 @@ impl CSConnection {
         }
     }
 
+    #[deprecated]
+    fn get_prop<T>(&mut self, property: u32) -> Result<T>
+    where
+        T: Default
+    {
+        self.diag_clear();
+        let buffer: T = Default::default();
+        let mut outlen = 0_i32;
+        let ret = unsafe {
+            ct_con_props(
+                self.conn_handle,
+                CS_GET,
+                property as i32,
+                mem::transmute(&buffer),
+                mem::size_of::<&T>() as i32,
+                &mut outlen)
+        };
+        assert_eq!(outlen, mem::size_of_val(&buffer) as i32);
+
+        if ret != CS_SUCCEED {
+            return Err(self.get_error().unwrap_or_else(|| Error::from_message("ct_con_props failed")));
+        }
+        Ok(buffer)
+    }
+
+    fn set_property<T>(&mut self, property: u32, data: &T) -> Result<()> {
+        Self::set_ctx_property(self.ctx_handle, property, data)
+    }
+
+    fn get_property<T>(&mut self, property: u32) -> Result<T> {
+        Self::get_ctx_property(self.ctx_handle, property)
+    }
+
+    pub fn set_ctx_property<T>(ctx: *mut CS_CONTEXT, property: u32, data: &T) -> Result<()> {
+        let ret = unsafe {
+            let ptr: *mut T = mem::transmute(data);
+            cs_config(
+                ctx,
+                CS_SET,
+                property as i32,
+                ptr as *mut c_void,
+                mem::size_of_val(data) as i32,
+                ptr::null_mut())
+        };
+        if ret == CS_SUCCEED {
+            Ok(())
+        } else {
+            Err(Error::from_message("cs_config failed"))
+        }
+    }
+
+    pub fn get_ctx_property<T>(ctx: *mut CS_CONTEXT, property: u32) -> Result<T> {
+        let mut buffer = MaybeUninit::<T>::uninit();
+        let mut outlen = 0_i32;
+        let ret = unsafe {
+            cs_config(
+                ctx,
+                CS_GET,
+                property as i32,
+                mem::transmute::<_,*mut T>(&buffer) as *mut c_void,
+                mem::size_of_val(&buffer) as i32,
+                &mut outlen)
+        };
+        assert_eq!(outlen as usize, mem::size_of_val(&buffer));
+
+        if ret == CS_SUCCEED {
+            let value = unsafe { buffer.assume_init() };
+            Ok(value)
+        } else {
+            Err(Error::from_message("cs_config failed"))
+        }
+    }
+
+    fn on_message(&mut self, error: Error) -> bool {
+        if let Some(callback) = self.msg_callback.as_mut() {
+            if !callback(&error) {
+                return true;
+            }
+        }
+        self.messages.push(error);
+        true
+    }
+
+    extern "C"
+    fn csmsg_callback(ctx: *mut CS_CONTEXT, msg: *const CS_CLIENTMSG) -> CS_RETCODE {
+        let conn = CSConnection::get_ctx_property::<*mut CSConnection>(
+            ctx, 
+            CS_USERDATA)
+            .expect("cs_config failed");
+
+        unsafe {
+            let err = Error {
+                type_: error::Type::Cs,
+                code: Some((*msg).msgnumber),
+                desc: CStr::from_ptr((*msg).msgstring.as_ptr())
+                    .to_string_lossy()
+                    .trim_end()
+                    .to_string(),
+                severity: Some((*msg).severity),
+            };
+            if (*conn).on_message(err) {
+                CS_SUCCEED
+            } else {
+                CS_FAIL
+            }
+        }
+    }
+
+    extern "C"
+    fn clientmsg_callback(ctx: *mut CS_CONTEXT, _conn: *const CS_CONNECTION, msg: *const CS_CLIENTMSG) -> CS_RETCODE {
+        let conn = CSConnection::get_ctx_property::<*mut CSConnection>(
+            ctx, 
+            CS_USERDATA)
+            .expect("cs_config failed");
+
+        unsafe {
+            let err = Error {
+                type_: error::Type::Client,
+                code: Some((*msg).msgnumber),
+                desc: CStr::from_ptr((*msg).msgstring.as_ptr())
+                    .to_string_lossy()
+                    .trim_end()
+                    .to_string(),
+                severity: Some((*msg).severity),
+            };
+            if (*conn).on_message(err) {
+                CS_SUCCEED
+            } else {
+                CS_FAIL
+            }
+        }
+    }
+
+    extern "C"
+    fn servermsg_callback(ctx: *mut CS_CONTEXT, _conn: *const CS_CONNECTION, msg: *const CS_SERVERMSG) -> CS_RETCODE {
+        let conn = CSConnection::get_ctx_property::<*mut CSConnection>(
+            ctx, 
+            CS_USERDATA)
+            .expect("cs_config failed");
+
+        unsafe {
+            let err = Error {
+                type_: error::Type::Server,
+                code: Some((*msg).msgnumber),
+                desc: CStr::from_ptr((*msg).text.as_ptr())
+                    .to_string_lossy()
+                    .trim_end()
+                    .to_string(),
+                severity: Some((*msg).severity),
+            };
+            if (*conn).on_message(err) {
+                CS_SUCCEED
+            } else {
+                CS_FAIL
+            }
+        }
+    }
+
 }
 
 impl Drop for CSConnection {
     fn drop(&mut self) {
         unsafe {
-            Diagnostics::remove_handler(self.ctx_handle);
+            //Diagnostics::remove_handler(self.ctx_handle);
 
             let ret = ct_con_drop(self.conn_handle);
             if ret != CS_SUCCEED {
@@ -386,23 +429,23 @@ impl ConnectionBuilder {
     }
 
     pub fn connect(&self) -> Result<Connection> {
-        let mut conn = CSConnection::new();
-        conn.diag_clear();
+        let conn = CSConnection::new();
+        conn.borrow_mut().diag_clear();
 
         if let Some(charset) = self.client_charset.as_ref() {
-            conn.set_prop(CS_CLIENTCHARSET, Property::String(charset))?;
+            conn.borrow_mut().set_prop(CS_CLIENTCHARSET, Property::String(charset))?;
         }
 
         if let Some(username) = self.username.as_ref() {
-            conn.set_prop(CS_USERNAME, Property::String(username))?;
+            conn.borrow_mut().set_prop(CS_USERNAME, Property::String(username))?;
         }
 
         if let Some(password) = self.password.as_ref() {
-            conn.set_prop(CS_PASSWORD, Property::String(password))?;
+            conn.borrow_mut().set_prop(CS_PASSWORD, Property::String(password))?;
         }
 
         if let Some(database) = self.database.as_ref() {
-            conn.set_prop(CS_DATABASE, Property::String(database))?;
+            conn.borrow_mut().set_prop(CS_DATABASE, Property::String(database))?;
         }
 
         if let Some(tds_version) = self.tds_version.as_ref() {
@@ -417,15 +460,15 @@ impl ConnectionBuilder {
                 TdsVersion::Tds73 => CS_TDS_73,
                 TdsVersion::Tds74 => CS_TDS_74,
             };
-            conn.set_prop(CS_TDS_VERSION, Property::U32(tdsver))?;
+            conn.borrow_mut().set_prop(CS_TDS_VERSION, Property::U32(tdsver))?;
         }
 
         if let Some(login_timeout) = self.login_timeout.as_ref() {
-            conn.set_prop(CS_LOGIN_TIMEOUT, Property::I32(*login_timeout))?;
+            conn.borrow_mut().set_prop(CS_LOGIN_TIMEOUT, Property::I32(*login_timeout))?;
         }
 
         if let Some(timeout) = self.timeout.as_ref() {
-            conn.set_prop(CS_TIMEOUT, Property::I32(*timeout))?;
+            conn.borrow_mut().set_prop(CS_TIMEOUT, Property::I32(*timeout))?;
         }
 
         let server_name = match self.server_name.as_ref() {
@@ -446,13 +489,14 @@ impl ConnectionBuilder {
         let cserver_name = CString::new(server_name)?;
         let ret = unsafe {
             ct_connect(
-                conn.conn_handle,
+                conn.borrow_mut().conn_handle,
                 mem::transmute(cserver_name.as_ptr()),
                 CS_NULLTERM,
             )
         };
         if ret != CS_SUCCEED {
             return Err(conn
+                        .borrow_mut()
                         .get_error()
                         .unwrap_or_else(|| Error::from_failure("ct_connect")))
         }
@@ -463,14 +507,12 @@ impl ConnectionBuilder {
 
 #[derive(Clone)]
 pub struct Connection {
-    pub(crate) conn: Arc<Mutex<CSConnection>>,
+    pub(crate) conn: Rc<RefCell<CSConnection>>,
 }
 
 impl Connection {
-    fn new(conn: CSConnection) -> Self {
-        Self {
-            conn: Arc::new(Mutex::new(conn))
-        }
+    fn new(conn: Rc<RefCell<CSConnection>>) -> Self {
+        Self { conn }
     }
 
     pub fn builder() -> ConnectionBuilder {
@@ -693,40 +735,21 @@ impl Connection {
     }
 
     pub fn diag_clear(&mut self) {
-        self.conn.lock().unwrap().messages.lock().unwrap().clear();
+        self.conn.borrow_mut().diag_clear();
     }
 
     fn diag_get(&mut self) -> Vec<Error> {
-        self.conn.lock().unwrap().messages.lock().unwrap().clone()
+        self.conn.borrow_mut().diag_get().clone()
     }
 
     pub fn get_error(&mut self) -> Option<Error> {
-        let errors = self.diag_get();
-        errors
-            .iter()
-            .find(|e| e.severity.unwrap_or(i32::MAX) > 10)
-            .cloned()
+        self.conn.borrow_mut().get_error()
     }
 
     pub fn is_connected(&mut self) -> bool {
-        let ret;
-        let status: i32 = Default::default();
-        self.diag_clear();
-        unsafe {
-            ret = ct_con_props(
-                self.conn.lock().unwrap().conn_handle,
-                CS_GET,
-                CS_CON_STATUS as i32,
-                mem::transmute(&status),
-                CS_UNUSED,
-                ptr::null_mut(),
-            );
-        }
-
-        if ret != CS_SUCCEED {
-            false
-        } else {
-            status == CS_CONSTAT_CONNECTED
+        match self.conn.borrow_mut().get_prop::<i32>(CS_CON_STATUS) {
+            Err(_) => false,
+            Ok(status) => status == CS_CONSTAT_CONNECTED,
         }
     }
 
@@ -749,7 +772,7 @@ impl Connection {
         let ret;
         unsafe {
             ret = cs_convert(
-                self.conn.lock().unwrap().ctx_handle,
+                self.conn.borrow().ctx_handle,
                 mem::transmute(srcfmt as *const CS_DATAFMT),
                 mem::transmute(srcdata.as_ptr()),
                 mem::transmute(dstfmt as *const CS_DATAFMT),
@@ -771,7 +794,7 @@ impl Connection {
         let ret;
         {
             ret = cs_dt_crack(
-                self.conn.lock().unwrap().ctx_handle,
+                self.conn.borrow().ctx_handle,
                 type_,
                 mem::transmute(dateval),
                 &mut daterec,
@@ -801,12 +824,12 @@ impl Connection {
         unsafe { self.dt_crack_unsafe(CS_DATETIME4_TYPE, &val) }
     }
 
-    pub fn set_message_callback(&mut self, callback: Box<dyn Fn(&Error) -> bool + Send>) {
-        *self.conn.lock().unwrap().msg_callback.lock().unwrap() = Some(callback);
+    pub fn set_message_callback(&mut self, callback: Box<dyn FnMut(&Error) -> bool>) {
+        self.conn.borrow_mut().msg_callback = Some(callback);
     }
 
     pub fn clear_message_callback(&mut self) {
-        *self.conn.lock().unwrap().msg_callback.lock().unwrap() = None;
+        self.conn.borrow_mut().msg_callback = None;
     }
 }
 
@@ -820,6 +843,7 @@ mod tests {
     use chrono::{NaiveDate, NaiveTime};
     use rust_decimal::Decimal;
     use std::cell::RefCell;
+    use std::mem::MaybeUninit;
     use std::sync::{Arc, Mutex};
     use std::thread;
     use std::time::Instant;
@@ -1309,6 +1333,39 @@ mod tests {
         assert_eq!(0, rs.status().unwrap());
 
         assert!(!rs.next_results());
+    }
+
+    #[test]
+    fn test_cs_userdata() {
+        unsafe {
+            let mut ctx: *mut CS_CONTEXT = ptr::null_mut();
+            let ret = cs_ctx_alloc(CS_VERSION_125, &mut ctx);
+            assert_eq!(CS_SUCCEED, ret);
+
+            let ret = ct_init(ctx, CS_VERSION_125);
+            assert_eq!(CS_SUCCEED, ret);
+
+            let mut data = 0xDEADBEEF_u32;
+
+            CSConnection::set_ctx_property(ctx, CS_USERDATA, &data).unwrap();
+            assert_eq!(0xDEADBEEF, CSConnection::get_ctx_property::<u32>(ctx, CS_USERDATA).unwrap());
+
+            let sdata = String::from("dead beef");
+            CSConnection::set_ctx_property(ctx, CS_USERDATA, &&sdata).unwrap();
+            assert_eq!(String::from("dead beef"), *CSConnection::get_ctx_property::<*const String>(ctx, CS_USERDATA).unwrap());
+
+            let ptr = &sdata as *const String;
+            CSConnection::set_ctx_property(ctx, CS_USERDATA, &ptr).unwrap();
+            assert_eq!(String::from("dead beef"), *CSConnection::get_ctx_property::<*const String>(ctx, CS_USERDATA).unwrap());
+        }
+    }
+
+    #[test]
+    fn test_set_property() {
+        let mut conn = connect();
+        conn.conn.borrow_mut().set_property(CS_USERDATA, &42).unwrap();
+        assert_eq!(42,
+                   conn.conn.borrow_mut().get_property::<i32>(CS_USERDATA).unwrap());
     }
 
 }

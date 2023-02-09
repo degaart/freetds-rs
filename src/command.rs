@@ -7,8 +7,7 @@ use freetds_sys::*;
 use std::ffi::CString;
 use std::mem;
 use std::ptr;
-use std::sync::Arc;
-use std::sync::Mutex;
+use std::rc::Rc;
 
 pub(crate) struct CSCommand {
     handle: *mut CS_COMMAND,
@@ -45,12 +44,12 @@ pub enum CommandArg<'a> {
 #[derive(Clone)]
 pub(crate) struct Command {
     pub conn: Connection,
-    pub cmd: Arc<Mutex<CSCommand>>,
+    pub cmd: Rc<CSCommand>,
 }
 
 impl Command {
     pub fn new(conn: Connection) -> Self {
-        let cmd = Arc::new(Mutex::new(CSCommand::new(&conn.conn.lock().unwrap())));
+        let cmd = Rc::new(CSCommand::new(&conn.conn.borrow()));
         Self { conn, cmd }
     }
 
@@ -64,9 +63,8 @@ impl Command {
                     let buffer = CString::new(s)?;
                     let ret;
                     {
-                        let cmd = self.cmd.lock().unwrap();
                         ret = ct_command(
-                            cmd.handle,
+                            self.cmd.handle,
                             cmd_type,
                             mem::transmute(buffer.as_ptr()),
                             CS_NULLTERM,
@@ -89,8 +87,7 @@ impl Command {
         self.conn.diag_clear();
         let ret;
         unsafe {
-            let cmd = self.cmd.lock().unwrap();
-            ret = ct_send(cmd.handle);
+            ret = ct_send(self.cmd.handle);
         }
         if ret == CS_SUCCEED {
             Ok(())
@@ -107,8 +104,7 @@ impl Command {
         let mut result_type: i32 = Default::default();
         let ret;
         unsafe {
-            let cmd = self.cmd.lock().unwrap();
-            ret = ct_results(cmd.handle, &mut result_type);
+            ret = ct_results(self.cmd.handle, &mut result_type);
         }
         if ret != CS_SUCCEED && ret != CS_END_RESULTS {
             Err(self
@@ -131,8 +127,7 @@ impl Command {
         self.conn.diag_clear();
         let ret;
         {
-            let cmd = self.cmd.lock().unwrap();
-            ret = ct_bind(cmd.handle, item, datafmt, buffer, data_length, indicator);
+            ret = ct_bind(self.cmd.handle, item, datafmt, buffer, data_length, indicator);
         }
         if ret == CS_SUCCEED {
             Ok(())
@@ -149,8 +144,7 @@ impl Command {
         let mut rows_read: i32 = Default::default();
         let ret;
         unsafe {
-            let cmd = self.cmd.lock().unwrap();
-            ret = ct_fetch(cmd.handle, CS_UNUSED, CS_UNUSED, CS_UNUSED, &mut rows_read);
+            ret = ct_fetch(self.cmd.handle, CS_UNUSED, CS_UNUSED, CS_UNUSED, &mut rows_read);
         }
         if ret == CS_SUCCEED {
             Ok(true)
@@ -171,9 +165,8 @@ impl Command {
         let mut out_len: CS_INT = Default::default();
         let ret;
         unsafe {
-            let cmd = self.cmd.lock().unwrap();
             ret = ct_res_info(
-                cmd.handle,
+                self.cmd.handle,
                 type_,
                 mem::transmute(&mut buf),
                 mem::size_of::<T>() as i32,
@@ -196,8 +189,7 @@ impl Command {
         let mut buf: CS_DATAFMT = Default::default();
         let ret;
         unsafe {
-            let cmd = self.cmd.lock().unwrap();
-            ret = ct_describe(cmd.handle, item, &mut buf);
+            ret = ct_describe(self.cmd.handle, item, &mut buf);
         }
         if ret == CS_SUCCEED {
             Ok(buf)
@@ -213,7 +205,7 @@ impl Command {
         self.conn.diag_clear();
         let ret;
         unsafe {
-            ret = ct_cancel(ptr::null_mut(), self.cmd.lock().unwrap().handle, type_);
+            ret = ct_cancel(ptr::null_mut(), self.cmd.handle, type_);
         }
         if ret == CS_SUCCEED {
             Ok(())

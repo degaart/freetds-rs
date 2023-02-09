@@ -9,6 +9,7 @@ pub mod result_set;
 pub mod statement;
 pub mod to_sql;
 pub mod util;
+pub mod value;
 
 pub use column_id::ColumnId;
 pub use connection::{Connection,TdsVersion};
@@ -20,6 +21,7 @@ pub type Result<T, E = error::Error> = core::result::Result<T, E>;
 pub use param_value::ParamValue;
 pub use rust_decimal::Decimal;
 pub use statement::Statement;
+pub use value::Value;
 
 #[derive(PartialEq, Debug, Clone)]
 pub(crate) enum TextPiece {
