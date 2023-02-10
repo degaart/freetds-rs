@@ -819,7 +819,6 @@ mod tests {
     use chrono::{NaiveDate, NaiveTime};
     use rust_decimal::Decimal;
     use std::cell::RefCell;
-    use std::mem::MaybeUninit;
     use std::sync::{Arc, Mutex};
     use std::thread;
     use std::time::Instant;
@@ -1340,7 +1339,7 @@ mod tests {
 
     #[test]
     fn test_set_property() {
-        let mut conn = connect();
+        let conn = connect();
         conn.conn.borrow_mut().set_conn_prop_i32(CS_USERDATA, 42).unwrap();
         assert_eq!(42,
                    conn.conn.borrow_mut().get_conn_prop_i32(CS_USERDATA).unwrap());
