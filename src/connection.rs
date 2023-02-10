@@ -1,22 +1,16 @@
 #![allow(clippy::useless_transmute)]
-#![allow(unused)]
 
 use crate::command::CommandArg;
 use crate::null::Null;
 use crate::result_set::{Column, ResultSet, Row, Rows, SybResult};
 use crate::to_sql::ToSql;
-use crate::{command::Command, error::Error, property::Property, Result};
+use crate::{command::Command, error::Error, Result};
 use crate::{error, generate_query, parse_query, Statement};
-use anyhow::bail;
 use freetds_sys::*;
-use log::debug;
-use once_cell::sync::OnceCell;
+use log::{debug, warn};
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::ffi::{c_void, CStr};
-use std::mem::MaybeUninit;
 use std::rc::Rc;
-use std::sync::{Arc, Mutex, MutexGuard};
 use std::{ffi::CString, mem, ptr};
 
 #[derive(Debug, Clone, Default)]
@@ -27,6 +21,79 @@ struct Bind {
 }
 
 type MessageCallback = Box<dyn FnMut(&Error) -> bool>;
+
+/*
+ * Helper functions
+ */
+fn set_conn_prop<T>(conn: *mut CS_CONNECTION, property: u32, value: *const T, len: usize) -> Result<()> {
+    let ret = unsafe {
+        ct_con_props(
+            conn,
+            CS_SET,
+            property as i32,
+            value as *mut c_void,
+            len.try_into().unwrap(),
+            ptr::null_mut())
+    };
+    if ret == CS_SUCCEED {
+        Ok(())
+    } else {
+        Err(Error::from_message("ct_con_props failed"))
+    }
+}
+
+fn get_conn_prop<T>(conn: *mut CS_CONNECTION, property: u32, dest: *mut T, len: usize) -> Result<usize> {
+    let mut outlen = 0;
+    let ret = unsafe {
+        ct_con_props(
+            conn,
+            CS_GET,
+            property as i32,
+            dest as *mut c_void,
+            len.try_into().unwrap(),
+            &mut outlen)
+    };
+    if ret == CS_SUCCEED {
+        Ok(outlen.try_into().or_else(|_| Err(Error::from_message("Failed to convert result to usize")))?)
+    } else {
+        Err(Error::from_message("ct_con_props failed"))
+    }
+}
+
+fn set_ctx_prop<T>(ctx: *mut CS_CONTEXT, property: u32, value: *const T, len: usize) -> Result<()> {
+    let ret = unsafe {
+        cs_config(
+            ctx,
+            CS_SET,
+            property as i32,
+            value as *mut c_void,
+            len.try_into().unwrap(),
+            ptr::null_mut())
+    };
+    if ret == CS_SUCCEED {
+        Ok(())
+    } else {
+        Err(Error::from_message("ct_con_props failed"))
+    }
+}
+
+fn get_ctx_prop<T>(ctx: *mut CS_CONTEXT, property: u32, dest: *mut T, len: usize) -> Result<usize> {
+    let mut outlen = 0;
+    let ret = unsafe {
+        cs_config(
+            ctx,
+            CS_GET,
+            property as i32,
+            dest as *mut c_void,
+            len.try_into().unwrap(),
+            &mut outlen)
+    };
+    if ret == CS_SUCCEED {
+        Ok(outlen.try_into().or_else(|_| Err(Error::from_message("Failed to convert result to usize")))?)
+    } else {
+        Err(Error::from_message("ct_con_props failed"))
+    }
+}
 
 /*
  * This struct is just for RAII of the inner handles
@@ -94,7 +161,7 @@ impl CSConnection {
             }));
 
             let ptr: *const CSConnection = { &*result.borrow() };
-            Self::set_ctx_property(ctx_handle, CS_USERDATA, &ptr)
+            set_ctx_prop(ctx_handle, CS_USERDATA, &ptr, mem::size_of_val(&ptr))
                 .expect("cs_config failed");
 
             Rc::clone(&result)
@@ -116,126 +183,6 @@ impl CSConnection {
             .cloned()
     }
 
-    #[deprecated]
-    fn set_prop(&mut self, property: u32, value: Property) -> Result<()> {
-        self.diag_clear();
-        unsafe {
-            let ret = match value {
-                Property::I32(mut i) => ct_con_props(
-                    self.conn_handle,
-                    CS_SET,
-                    property as CS_INT,
-                    std::mem::transmute(&mut i),
-                    mem::size_of::<i32>() as i32,
-                    ptr::null_mut(),
-                ),
-                Property::U32(mut i) => ct_con_props(
-                    self.conn_handle,
-                    CS_SET,
-                    property as CS_INT,
-                    std::mem::transmute(&mut i),
-                    mem::size_of::<u32>() as i32,
-                    ptr::null_mut(),
-                ),
-                Property::String(s) => {
-                    let s1 = CString::new(s)?;
-                    ct_con_props(
-                        self.conn_handle,
-                        CS_SET,
-                        property as CS_INT,
-                        std::mem::transmute(s1.as_ptr()),
-                        s.len() as i32,
-                        ptr::null_mut(),
-                    )
-                }
-                _ => {
-                    return Err(Error::from_message("Invalid argument"));
-                }
-            };
-
-            if ret == CS_SUCCEED {
-                Ok(())
-            } else {
-                Err(self
-                    .get_error()
-                    .unwrap_or_else(|| Error::from_message("ct_con_props failed")))
-            }
-        }
-    }
-
-    #[deprecated]
-    fn get_prop<T>(&mut self, property: u32) -> Result<T>
-    where
-        T: Default
-    {
-        self.diag_clear();
-        let buffer: T = Default::default();
-        let mut outlen = 0_i32;
-        let ret = unsafe {
-            ct_con_props(
-                self.conn_handle,
-                CS_GET,
-                property as i32,
-                mem::transmute(&buffer),
-                mem::size_of::<&T>() as i32,
-                &mut outlen)
-        };
-        assert_eq!(outlen, mem::size_of_val(&buffer) as i32);
-
-        if ret != CS_SUCCEED {
-            return Err(self.get_error().unwrap_or_else(|| Error::from_message("ct_con_props failed")));
-        }
-        Ok(buffer)
-    }
-
-    fn set_property<T>(&mut self, property: u32, data: &T) -> Result<()> {
-        Self::set_ctx_property(self.ctx_handle, property, data)
-    }
-
-    fn get_property<T>(&mut self, property: u32) -> Result<T> {
-        Self::get_ctx_property(self.ctx_handle, property)
-    }
-
-    pub fn set_ctx_property<T>(ctx: *mut CS_CONTEXT, property: u32, data: &T) -> Result<()> {
-        let ret = unsafe {
-            let ptr: *mut T = mem::transmute(data);
-            cs_config(
-                ctx,
-                CS_SET,
-                property as i32,
-                ptr as *mut c_void,
-                mem::size_of_val(data) as i32,
-                ptr::null_mut())
-        };
-        if ret == CS_SUCCEED {
-            Ok(())
-        } else {
-            Err(Error::from_message("cs_config failed"))
-        }
-    }
-
-    pub fn get_ctx_property<T>(ctx: *mut CS_CONTEXT, property: u32) -> Result<T> {
-        let mut buffer = MaybeUninit::<T>::uninit();
-        let mut outlen = 0_i32;
-        let ret = unsafe {
-            cs_config(
-                ctx,
-                CS_GET,
-                property as i32,
-                mem::transmute::<_,*mut T>(&buffer) as *mut c_void,
-                mem::size_of_val(&buffer) as i32,
-                &mut outlen)
-        };
-        assert_eq!(outlen as usize, mem::size_of_val(&buffer));
-
-        if ret == CS_SUCCEED {
-            let value = unsafe { buffer.assume_init() };
-            Ok(value)
-        } else {
-            Err(Error::from_message("cs_config failed"))
-        }
-    }
-
     fn on_message(&mut self, error: Error) -> bool {
         if let Some(callback) = self.msg_callback.as_mut() {
             if !callback(&error) {
@@ -248,9 +195,8 @@ impl CSConnection {
 
     extern "C"
     fn csmsg_callback(ctx: *mut CS_CONTEXT, msg: *const CS_CLIENTMSG) -> CS_RETCODE {
-        let conn = CSConnection::get_ctx_property::<*mut CSConnection>(
-            ctx, 
-            CS_USERDATA)
+        let mut conn: *mut CSConnection = ptr::null_mut();
+        get_ctx_prop(ctx, CS_USERDATA, &mut conn, mem::size_of_val(&conn))
             .expect("cs_config failed");
 
         unsafe {
@@ -273,9 +219,8 @@ impl CSConnection {
 
     extern "C"
     fn clientmsg_callback(ctx: *mut CS_CONTEXT, _conn: *const CS_CONNECTION, msg: *const CS_CLIENTMSG) -> CS_RETCODE {
-        let conn = CSConnection::get_ctx_property::<*mut CSConnection>(
-            ctx, 
-            CS_USERDATA)
+        let mut conn: *mut CSConnection = ptr::null_mut();
+        get_ctx_prop(ctx, CS_USERDATA, &mut conn, mem::size_of_val(&conn))
             .expect("cs_config failed");
 
         unsafe {
@@ -298,9 +243,8 @@ impl CSConnection {
 
     extern "C"
     fn servermsg_callback(ctx: *mut CS_CONTEXT, _conn: *const CS_CONNECTION, msg: *const CS_SERVERMSG) -> CS_RETCODE {
-        let conn = CSConnection::get_ctx_property::<*mut CSConnection>(
-            ctx, 
-            CS_USERDATA)
+        let mut conn: *mut CSConnection = ptr::null_mut();
+        get_ctx_prop(ctx, CS_USERDATA, &mut conn, mem::size_of_val(&conn))
             .expect("cs_config failed");
 
         unsafe {
@@ -319,6 +263,35 @@ impl CSConnection {
                 CS_FAIL
             }
         }
+    }
+
+    fn set_conn_prop_i32(&mut self, property: u32, value: i32) -> Result<()> {
+        set_conn_prop(
+            self.conn_handle, 
+            property, 
+            &value, 
+            mem::size_of_val(&value))
+    }
+
+    fn set_conn_prop_str(&mut self, property: u32, value: &str) -> Result<()> {
+        set_conn_prop(
+            self.conn_handle,
+            property,
+            value.as_ptr(),
+            value.len())
+    }
+
+    fn get_conn_prop_i32(&mut self, property: u32) -> Result<i32> {
+        let mut value = 0_i32;
+        get_conn_prop(
+            self.conn_handle,
+            property,
+            &mut value,
+            mem::size_of_val(&value))?;
+        /*
+         * Fixed-size fields (like CS_CONSTAT_CONNECTED) do not set outlen correctly
+         */
+        Ok(value)
     }
 
 }
@@ -433,19 +406,19 @@ impl ConnectionBuilder {
         conn.borrow_mut().diag_clear();
 
         if let Some(charset) = self.client_charset.as_ref() {
-            conn.borrow_mut().set_prop(CS_CLIENTCHARSET, Property::String(charset))?;
+            conn.borrow_mut().set_conn_prop_str(CS_CLIENTCHARSET, charset)?;
         }
 
         if let Some(username) = self.username.as_ref() {
-            conn.borrow_mut().set_prop(CS_USERNAME, Property::String(username))?;
+            conn.borrow_mut().set_conn_prop_str(CS_USERNAME, username)?;
         }
 
         if let Some(password) = self.password.as_ref() {
-            conn.borrow_mut().set_prop(CS_PASSWORD, Property::String(password))?;
+            conn.borrow_mut().set_conn_prop_str(CS_PASSWORD, password)?;
         }
 
         if let Some(database) = self.database.as_ref() {
-            conn.borrow_mut().set_prop(CS_DATABASE, Property::String(database))?;
+            conn.borrow_mut().set_conn_prop_str(CS_DATABASE, database)?;
         }
 
         if let Some(tds_version) = self.tds_version.as_ref() {
@@ -460,15 +433,15 @@ impl ConnectionBuilder {
                 TdsVersion::Tds73 => CS_TDS_73,
                 TdsVersion::Tds74 => CS_TDS_74,
             };
-            conn.borrow_mut().set_prop(CS_TDS_VERSION, Property::U32(tdsver))?;
+            conn.borrow_mut().set_conn_prop_i32(CS_TDS_VERSION, tdsver as i32)?;
         }
 
         if let Some(login_timeout) = self.login_timeout.as_ref() {
-            conn.borrow_mut().set_prop(CS_LOGIN_TIMEOUT, Property::I32(*login_timeout))?;
+            conn.borrow_mut().set_conn_prop_i32(CS_LOGIN_TIMEOUT, *login_timeout)?;
         }
 
         if let Some(timeout) = self.timeout.as_ref() {
-            conn.borrow_mut().set_prop(CS_TIMEOUT, Property::I32(*timeout))?;
+            conn.borrow_mut().set_conn_prop_i32(CS_TIMEOUT, *timeout)?;
         }
 
         let server_name = match self.server_name.as_ref() {
@@ -747,9 +720,12 @@ impl Connection {
     }
 
     pub fn is_connected(&mut self) -> bool {
-        match self.conn.borrow_mut().get_prop::<i32>(CS_CON_STATUS) {
-            Err(_) => false,
+        match self.conn.borrow_mut().get_conn_prop_i32(CS_CON_STATUS) {
             Ok(status) => status == CS_CONSTAT_CONNECTED,
+            Err(e) => {
+                warn!("CS_CON_STATUS: {}", e.to_string());
+                false
+            },
         }
     }
 
@@ -1345,27 +1321,35 @@ mod tests {
             let ret = ct_init(ctx, CS_VERSION_125);
             assert_eq!(CS_SUCCEED, ret);
 
-            let mut data = 0xDEADBEEF_u32;
+            let data = 0xDEADBEEF_u32;
+            set_ctx_prop(ctx, CS_USERDATA, &data, mem::size_of_val(&data)).unwrap();
 
-            CSConnection::set_ctx_property(ctx, CS_USERDATA, &data).unwrap();
-            assert_eq!(0xDEADBEEF, CSConnection::get_ctx_property::<u32>(ctx, CS_USERDATA).unwrap());
+            let mut data = 0_u32;
+            get_ctx_prop(ctx, CS_USERDATA, &mut data, mem::size_of_val(&data)).unwrap();
+            assert_eq!(0xDEADBEEF, data);
 
-            let sdata = String::from("dead beef");
-            CSConnection::set_ctx_property(ctx, CS_USERDATA, &&sdata).unwrap();
-            assert_eq!(String::from("dead beef"), *CSConnection::get_ctx_property::<*const String>(ctx, CS_USERDATA).unwrap());
+            let data = String::from("dead beef");
+            let ptr: *const String = &data;
+            set_ctx_prop(ctx, CS_USERDATA, &ptr, mem::size_of_val(&ptr)).unwrap();
 
-            let ptr = &sdata as *const String;
-            CSConnection::set_ctx_property(ctx, CS_USERDATA, &ptr).unwrap();
-            assert_eq!(String::from("dead beef"), *CSConnection::get_ctx_property::<*const String>(ctx, CS_USERDATA).unwrap());
+            let mut ptr: *mut String = ptr::null_mut();
+            get_ctx_prop(ctx, CS_USERDATA, &mut ptr, mem::size_of_val(&ptr)).unwrap();
+            assert_eq!(String::from("dead beef"), *ptr);
         }
     }
 
     #[test]
     fn test_set_property() {
         let mut conn = connect();
-        conn.conn.borrow_mut().set_property(CS_USERDATA, &42).unwrap();
+        conn.conn.borrow_mut().set_conn_prop_i32(CS_USERDATA, 42).unwrap();
         assert_eq!(42,
-                   conn.conn.borrow_mut().get_property::<i32>(CS_USERDATA).unwrap());
+                   conn.conn.borrow_mut().get_conn_prop_i32(CS_USERDATA).unwrap());
+    }
+
+    #[test]
+    fn test_is_connected() {
+        let mut conn = connect();
+        assert_eq!(true, conn.is_connected());
     }
 
 }
