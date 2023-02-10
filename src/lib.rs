@@ -4,7 +4,6 @@ pub mod connection;
 pub mod error;
 pub mod null;
 pub mod param_value;
-pub mod property;
 pub mod result_set;
 pub mod statement;
 pub mod to_sql;
