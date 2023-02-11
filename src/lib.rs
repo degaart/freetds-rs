@@ -7,7 +7,6 @@ pub mod statement;
 pub mod to_sql;
 pub mod util;
 pub mod value;
-pub(crate) mod cs_context;
 
 pub use column_id::ColumnId;
 pub use connection::{Connection,TdsVersion};
