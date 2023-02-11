@@ -1,13 +1,12 @@
 #![allow(clippy::useless_transmute)]
 
 use crate::command::CommandArg;
-use crate::null::Null;
 use crate::result_set::{Column, ResultSet, Row, Rows, SybResult};
 use crate::to_sql::ToSql;
 use crate::{command::Command, error::Error, Result};
 use crate::{error, generate_query, parse_query, Statement};
 use freetds_sys::*;
-use log::{debug, warn};
+use log::warn;
 use std::cell::RefCell;
 use std::ffi::{c_void, CStr};
 use std::rc::Rc;
@@ -97,9 +96,6 @@ fn get_ctx_prop<T>(ctx: *mut CS_CONTEXT, property: u32, dest: *mut T, len: usize
 
 /*
  * This struct is just for RAII of the inner handles
- * The refcells are just for avoiding UB, we could
- * probably remove them once we are sure everything
- * work ok
  */
 pub(crate) struct CSConnection {
     pub ctx_handle: *mut CS_CONTEXT,
@@ -492,13 +488,18 @@ impl Connection {
         ConnectionBuilder::default()
     }
 
+    /*
+     * TODO: implement this in terms of execute_statement
+     */
     pub fn execute(&mut self, text: impl AsRef<str>, params: &[&dyn ToSql]) -> Result<ResultSet> {
         let parsed_query = parse_query(text.as_ref());
         if parsed_query.params.len() != params.len() {
             return Err(Error::from_message("Invalid parameter count"));
         }
 
-        let text = generate_query(&parsed_query, params.iter().copied());
+        let mut text = String::new();
+        generate_query(&mut text, &parsed_query, params.iter().copied())
+            .map_err(|e| Error::from_message(e.to_string()))?;
 
         let mut command = Command::new(self.clone());
         command.command(CS_LANG_CMD, CommandArg::String(&text), CS_UNUSED)?;
@@ -566,13 +567,12 @@ impl Connection {
         let params: Vec<&dyn ToSql> = st
             .params
             .iter()
-            .map(|param| match param {
-                None => &Null {} as &dyn ToSql,
-                Some(param) => param as &dyn ToSql,
-            })
+            .map(|param| param as &dyn ToSql)
             .collect();
-        let text = generate_query(&st.query, params.iter().copied());
-        debug!("Generated statement: {}", text);
+
+        let mut text = String::new();
+        generate_query(&mut text, &st.query, params.iter().copied())
+            .map_err(|e| Error::from_message(e.to_string()))?;
 
         let mut command = Command::new(self.clone());
         command.command(CS_LANG_CMD, CommandArg::String(&text), CS_UNUSED)?;
@@ -814,31 +814,15 @@ unsafe impl Send for Connection {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tests::{get_test_server, connect};
     use crate::to_sql::ToSql;
-    use crate::{generate_query, parse_query, ParamValue, Statement};
+    use crate::{generate_query, parse_query, Statement, Value};
     use chrono::{NaiveDate, NaiveTime};
     use rust_decimal::Decimal;
     use std::cell::RefCell;
     use std::sync::{Arc, Mutex};
     use std::thread;
     use std::time::Instant;
-
-    const SERVER: &str = "***REMOVED***";
-
-    fn connect() -> Connection {
-        Connection::builder()
-            .host(SERVER)
-            .port(2025)
-            .client_charset("UTF-8")
-            .username("sa")
-            .password("")
-            .database("master")
-            .tds_version(TdsVersion::Tds50)
-            .login_timeout(5)
-            .timeout(5)
-            .connect()
-            .unwrap()
-    }
 
     #[test]
     fn test_select() {
@@ -900,68 +884,57 @@ mod tests {
         let mut rs = conn.execute(text, &[]).unwrap();
         assert!(rs.next());
         assert_eq!(
-            Some(ParamValue::Blob(vec![0xDE, 0xAD, 0xBE, 0xEF])),
+            Value::from(vec![0xDE_u8, 0xAD, 0xBE, 0xEF]),
             rs.get_value("binary").unwrap()
         );
         assert_eq!(
-            Some(ParamValue::Blob(vec![0xDE, 0xAD, 0xBE, 0xEF])),
+            Value::from(vec![0xDE_u8, 0xAD, 0xBE, 0xEF]),
             rs.get_value("image").unwrap()
         );
         assert_eq!(
-            Some(ParamValue::String(String::from("deadbeef"))),
+            Value::from("deadbeef"),
             rs.get_value("char").unwrap()
         );
         assert_eq!(
-            Some(ParamValue::String(String::from("deadbeef"))),
+            Value::from("deadbeef"),
             rs.get_value("text").unwrap()
         );
         assert_eq!(
-            Some(ParamValue::String(String::from("deadbeef"))),
+            Value::from("deadbeef"),
             rs.get_value("unichar").unwrap()
         );
         assert_eq!(
-            Some(ParamValue::Date(
-                NaiveDate::from_ymd_opt(1986, 7, 4).unwrap()
-            )),
+            Value::from(NaiveDate::from_ymd_opt(1986, 7, 4).unwrap()),
             rs.get_value("date").unwrap()
         );
         assert_eq!(
-            Some(ParamValue::Time(
-                NaiveTime::from_hms_milli_opt(10, 1, 2, 300).unwrap()
-            )),
+            Value::from(NaiveTime::from_hms_milli_opt(10, 1, 2, 300).unwrap()),
             rs.get_value("time").unwrap()
         );
         assert_eq!(
-            Some(ParamValue::DateTime(
+            Value::from(
                 NaiveDate::from_ymd_opt(1986, 7, 4)
                     .unwrap()
                     .and_hms_milli_opt(10, 1, 2, 300)
                     .unwrap()
-            )),
+            ),
             rs.get_value("datetime").unwrap()
         );
         assert_eq!(
-            Some(ParamValue::I32(2147483647)),
+            Value::from(2147483647),
             rs.get_value("int").unwrap()
         );
-        assert_eq!(Some(ParamValue::I32(1)), rs.get_value("bit").unwrap());
-        assert_eq!(Some(ParamValue::I32(2)), rs.get_value("tinyint").unwrap());
-        assert_eq!(Some(ParamValue::I32(3)), rs.get_value("smallint").unwrap());
+        assert_eq!(Value::from(1), rs.get_value("bit").unwrap());
+        assert_eq!(Value::from(2), rs.get_value("tinyint").unwrap());
+        assert_eq!(Value::from(3), rs.get_value("smallint").unwrap());
         assert_eq!(
-            Some(ParamValue::Decimal(
-                Decimal::from_str_exact("1.23456789").unwrap()
-            )),
+            Value::from(Decimal::from_str_exact("1.23456789").unwrap()),
             rs.get_value("numeric").unwrap()
         );
-        assert_eq!(
-            Some(ParamValue::I64(2147483648)),
-            rs.get_value("long").unwrap()
+        assert_eq!(Value::from(2147483648_i64), rs.get_value("long").unwrap()
         );
-        assert_eq!(Some(ParamValue::F64(42.0)), rs.get_value("real").unwrap());
-        assert_eq!(
-            Some(ParamValue::F64(1.23456789)),
-            rs.get_value("float").unwrap()
-        );
+        assert_eq!(Value::from(42.0), rs.get_value("real").unwrap());
+        assert_eq!(Value::from(1.23456789), rs.get_value("float").unwrap());
     }
 
     #[test]
@@ -1080,7 +1053,9 @@ mod tests {
         params.push(&param6);
 
         let parsed_query = parse_query(s);
-        let generated = generate_query(&parsed_query, params.iter().map(|param| *param));
+        let mut generated = String::new();
+        generate_query(&mut generated, &parsed_query, params.iter().map(|param| *param))
+            .unwrap();
         assert_eq!("string: 'aaa', i32: 1, i64: 2, f64: 3.14, date: '1986/07/05 10:30:31', image: 0xDEADBEEF", generated);
     }
 
@@ -1189,12 +1164,13 @@ mod tests {
     #[test]
     fn test_database() {
         /* Test connecting correctly sets the database */
+        let (server, port) = get_test_server();
         let mut conn = Connection::builder()
-            .host(SERVER)
-            .port(2025)
-            .client_charset("UTF-8")
+            .host(&server)
+            .port(port)
             .username("sa")
             .password("")
+            .client_charset("UTF-8")
             .database("master")
             .tds_version(TdsVersion::Tds50)
             .login_timeout(5)
@@ -1207,11 +1183,11 @@ mod tests {
         assert_eq!(Some(String::from("master")), rs.get_string(0).unwrap());
 
         let mut conn = Connection::builder()
-            .host(SERVER)
-            .port(2025)
-            .client_charset("UTF-8")
+            .host(&server)
+            .port(port)
             .username("sa")
             .password("")
+            .client_charset("UTF-8")
             .database("sybsystemprocs")
             .tds_version(TdsVersion::Tds50)
             .login_timeout(5)

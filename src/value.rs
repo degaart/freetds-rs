@@ -3,7 +3,9 @@ use std::fmt::{Display, Formatter, Write};
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 use rust_decimal::Decimal;
 
-#[derive(Debug, Clone)]
+use crate::to_sql::ToSql;
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum Value {
     Null,
     String(String),
@@ -17,64 +19,32 @@ pub enum Value {
     Blob(Vec<u8>),
 }
 
-impl Value {
-    fn new() -> Self {
-        Self::Null
-    }
-
-    pub fn to_sql(&self, f: &mut Formatter) -> std::fmt::Result {
+impl ToSql for Value {
+    fn to_sql(&self, f: &mut dyn std::fmt::Write) -> std::fmt::Result {
         match self {
-            Value::Null => write!(f, "null"),
-            Value::String(s) => Self::write_string(f, s),
-            Value::I32(i) => write!(f, "{i}"),
-            Value::I64(i) => write!(f, "{i}"),
-            Value::F64(d) => write!(f, "{d}"),
-            Value::Decimal(d) => write!(f, "{d}"),
-            Value::Date(d) => Self::write_date(f, d),
-            Value::Time(t) => Self::write_time(f, t),
-            Value::DateTime(dt) => Self::write_datetime(f, dt),
-            Value::Blob(b) => Self::write_blob(f, b),
+            Value::Null => None::<i32>.to_sql(f),
+            Value::String(s) => s.to_sql(f),
+            Value::I32(i) => i.to_sql(f),
+            Value::I64(i) => i.to_sql(f),
+            Value::F64(i) => i.to_sql(f),
+            Value::Decimal(d) => d.to_sql(f),
+            Value::Date(d) => d.to_sql(f),
+            Value::Time(t) => t.to_sql(f),
+            Value::DateTime(dt) => dt.to_sql(f),
+            Value::Blob(b) => b.to_sql(f),
         }
     }
-
-    fn write_string(f: &mut Formatter, s: &str) -> std::fmt::Result {
-        const QUOTE: char = '\'';
-        f.write_char(QUOTE)?;
-        for c in s.chars() {
-            f.write_char(c)?;
-            if c == QUOTE {
-                f.write_char(c)?;
-            }
-        }
-        f.write_char(QUOTE)?;
-        Ok(())
-    }
-
-    fn write_date(f: &mut Formatter, d: &NaiveDate) -> std::fmt::Result {
-        f.write_str(&d.format("'%Y/%m/%d'").to_string())
-    }
-
-    fn write_time(f: &mut Formatter, t: &NaiveTime) -> std::fmt::Result {
-        f.write_str(&t.format("'%H:%M:%S%.f'").to_string())
-    }
-
-    fn write_datetime(f: &mut Formatter, dt: &NaiveDateTime) -> std::fmt::Result {
-        f.write_str(&dt.format("'%Y/%m/%d %H:%M:%S%.f'").to_string())
-    }
-
-    fn write_blob(f: &mut Formatter, b: &[u8]) -> std::fmt::Result {
-        f.write_str("0x")?;
-        for c in b.iter() {
-            write!(f, "{c:02X}")?;
-        }
-        Ok(())
-    }
-
 }
 
 impl Display for Value {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         self.to_sql(f)
+    }
+}
+
+impl Default for Value {
+    fn default() -> Self {
+        Self::Null
     }
 }
 

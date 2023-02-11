@@ -53,7 +53,7 @@ impl Command {
         Self { conn, cmd }
     }
 
-    pub fn command(&mut self, cmd_type: CS_INT, buffer: CommandArg, option: CS_INT) -> Result<()> {
+    pub fn command(&mut self, cmd_type: i32, buffer: CommandArg, option: i32) -> Result<()> {
         unsafe {
             match buffer {
                 CommandArg::String(s) => {
@@ -158,11 +158,11 @@ impl Command {
         }
     }
 
-    pub fn res_info<T: Default>(&mut self, type_: CS_INT) -> Result<T> {
+    pub fn res_info<T: Default>(&mut self, type_: i32) -> Result<T> {
         self.conn.diag_clear();
 
         let mut buf: T = Default::default();
-        let mut out_len: CS_INT = Default::default();
+        let mut out_len: i32 = Default::default();
         let ret;
         unsafe {
             ret = ct_res_info(

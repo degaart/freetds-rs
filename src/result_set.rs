@@ -1,6 +1,6 @@
 #![allow(clippy::expect_fun_call)]
 
-use crate::{column_id::ColumnId, Connection, Error, ParamValue, Result};
+use crate::{column_id::ColumnId, Connection, Error, Result, Value};
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 use freetds_sys::*;
 use rust_decimal::Decimal;
@@ -320,18 +320,19 @@ impl ResultSet {
         }
     }
 
-    pub fn get_value(&mut self, col: impl Into<ColumnId>) -> Result<Option<ParamValue>> {
+    pub fn get_value(&mut self, col: impl Into<ColumnId>) -> Result<Value> {
         let (fmt, buffer) = self.get_buffer(col)?;
 
         match buffer {
-            None => Ok(None),
+            None => Ok(Value::Null),
             Some(buffer) => match fmt.datatype {
                 CS_BINARY_TYPE | CS_IMAGE_TYPE => {
-                    Ok(Some(ParamValue::Blob(Rc::clone(&buffer).deref().clone())))
+                    let buf: &Vec<u8> = &buffer;
+                    Ok(Value::from(buf))
                 }
-                CS_CHAR_TYPE | CS_TEXT_TYPE => Ok(Some(ParamValue::String(
+                CS_CHAR_TYPE | CS_TEXT_TYPE => Ok(Value::from(
                     String::from_utf8_lossy(&buffer).to_string(),
-                ))),
+                )),
                 CS_UNICHAR_TYPE => {
                     let dstfmt = CS_DATAFMT {
                         datatype: CS_CHAR_TYPE,
@@ -345,15 +346,15 @@ impl ResultSet {
                     let dstlen = self
                         .conn
                         .convert(&fmt, &buffer, &dstfmt, &mut dstdata)?;
-                    Ok(Some(ParamValue::String(
+                    Ok(Value::from(
                         String::from_utf8_lossy(&dstdata.as_slice()[0..dstlen]).to_string(),
-                    )))
+                    ))
                 }
                 CS_DATE_TYPE | CS_TIME_TYPE | CS_DATETIME_TYPE | CS_DATETIME4_TYPE => {
                     let datatype = fmt.datatype;
                     let daterec = self.convert_date(&fmt, &buffer)?;
-                    Ok(Some(match datatype {
-                        CS_DATE_TYPE => ParamValue::Date(
+                    Ok(match datatype {
+                        CS_DATE_TYPE => Value::from(
                             NaiveDate::from_ymd_opt(
                                 daterec.dateyear,
                                 (daterec.datemonth + 1) as u32,
@@ -361,7 +362,7 @@ impl ResultSet {
                             )
                             .ok_or_else(|| Error::from_message("Invalid date"))?,
                         ),
-                        CS_TIME_TYPE => ParamValue::Time(
+                        CS_TIME_TYPE => Value::from(
                             NaiveTime::from_hms_milli_opt(
                                 daterec.datehour as u32,
                                 daterec.dateminute as u32,
@@ -370,7 +371,7 @@ impl ResultSet {
                             )
                             .ok_or_else(|| Error::from_message("Invalid time"))?,
                         ),
-                        CS_DATETIME_TYPE | CS_DATETIME4_TYPE => ParamValue::DateTime(
+                        CS_DATETIME_TYPE | CS_DATETIME4_TYPE => Value::from(
                             NaiveDate::from_ymd_opt(
                                 daterec.dateyear,
                                 (daterec.datemonth + 1) as u32,
@@ -386,12 +387,12 @@ impl ResultSet {
                             .ok_or_else(|| Error::from_message("Invalid date"))?,
                         ),
                         _ => panic!("Invalid code path"),
-                    }))
+                    })
                 }
                 CS_INT_TYPE => unsafe {
                     assert_eq!(buffer.len(), mem::size_of::<i32>());
                     let ptr: *const i32 = mem::transmute(buffer.as_ptr());
-                    Ok(Some(ParamValue::I32(*ptr)))
+                    Ok(Value::from(*ptr))
                 },
                 CS_BIT_TYPE | CS_TINYINT_TYPE | CS_SMALLINT_TYPE => {
                     let dstfmt = CS_DATAFMT {
@@ -409,7 +410,7 @@ impl ResultSet {
                     assert_eq!(dstlen, mem::size_of::<i32>());
                     unsafe {
                         let ptr: *const i32 = mem::transmute(buffer.as_ptr());
-                        Ok(Some(ParamValue::I32(*ptr)))
+                        Ok(Value::from(*ptr))
                     }
                 }
                 CS_MONEY_TYPE | CS_MONEY4_TYPE | CS_DECIMAL_TYPE | CS_NUMERIC_TYPE => {
@@ -429,7 +430,7 @@ impl ResultSet {
                         assert_eq!(dstlen, mem::size_of::<i64>());
                         unsafe {
                             let ptr: *const i64 = mem::transmute(dstdata.as_ptr());
-                            Ok(Some(ParamValue::I64(*ptr)))
+                            Ok(Value::from(*ptr))
                         }
                     } else {
                         let dstfmt = CS_DATAFMT {
@@ -447,21 +448,21 @@ impl ResultSet {
                             self.conn
                                 .convert(&fmt, &buffer, &dstfmt, &mut dstdata)?;
                         let s = String::from_utf8_lossy(&dstdata.as_slice()[0..dstlen]).to_string();
-                        Ok(Some(ParamValue::Decimal(
+                        Ok(Value::from(
                             Decimal::from_str_exact(&s)
                                 .map_err(|_| Error::from_message("Invalid decimal"))?,
-                        )))
+                        ))
                     }
                 }
                 CS_REAL_TYPE => unsafe {
                     assert_eq!(buffer.len(), mem::size_of::<f32>());
                     let ptr: *const f32 = mem::transmute(buffer.as_ptr());
-                    Ok(Some(ParamValue::F64(Into::<f64>::into(*ptr))))
+                    Ok(Value::from(Into::<f64>::into(*ptr)))
                 },
                 CS_FLOAT_TYPE => unsafe {
                     assert_eq!(buffer.len(), mem::size_of::<f64>());
                     let ptr: *const f64 = mem::transmute(buffer.as_ptr());
-                    Ok(Some(ParamValue::F64(*ptr)))
+                    Ok(Value::from(*ptr))
                 },
                 _ => Err(Error::from_message("Unsupported datatype")),
             },
@@ -630,7 +631,7 @@ impl ResultSet {
             Some(buffer) => match fmt.datatype {
                 CS_BINARY_TYPE | CS_IMAGE_TYPE => Ok(Some(buffer.deref().clone())),
                 CS_VARBINARY_TYPE => {
-                    panic!("Not implemented yet");
+                    todo!();
                 }
                 _ => {
                     let dstfmt = CS_DATAFMT {

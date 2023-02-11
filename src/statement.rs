@@ -1,20 +1,18 @@
 #![allow(clippy::expect_fun_call)]
 
-use crate::{parse_query, ColumnId, ParamValue, ParsedQuery};
+use crate::{parse_query, ColumnId, ParsedQuery, Value};
 
 pub struct Statement {
     pub(crate) text: String,
     pub(crate) query: ParsedQuery,
-    pub(crate) params: Vec<Option<ParamValue>>,
+    pub(crate) params: Vec<Value>,
 }
 
 impl Statement {
     pub fn new(text: &str) -> Self {
         let query = parse_query(text);
         let mut params = Vec::with_capacity(query.params.len());
-        for _ in 0..query.params.len() {
-            params.push(None);
-        }
+        params.resize(query.params.len(), Default::default());
         Self {
             text: String::from(text),
             query,
@@ -22,19 +20,20 @@ impl Statement {
         }
     }
 
-    pub fn set_param(&mut self, id: impl Into<ColumnId>, value: impl Into<ParamValue> + Clone) {
+    pub fn set_param(&mut self, id: impl Into<ColumnId>, value: impl Into<Value>) {
         match id.into() {
             ColumnId::I32(i) => {
                 let i: usize = i.try_into().expect(&format!("Invalid column index: {}", i));
                 if i >= self.query.params.len() {
                     panic!("Invalid column index");
                 }
-                self.params[i] = Some(value.into());
+                self.params[i] = value.into();
             }
             ColumnId::String(s) => {
                 let indexes = self.query.param_index(&s);
+                let param_val: Value = value.into();
                 for i in indexes {
-                    self.params[i] = Some(value.clone().into());
+                    self.params[i] = param_val.clone();
                 }
             }
         };
@@ -51,7 +50,7 @@ impl Statement {
 
 #[cfg(test)]
 mod tests {
-    use crate::{generate_query, null::Null, to_sql::ToSql, ParamValue, Statement};
+    use crate::{generate_query, to_sql::ToSql, Statement, Value};
 
     #[test]
     fn test_set_param() {
@@ -66,15 +65,15 @@ mod tests {
 
         assert_eq!(
             st.params[0],
-            Some(ParamValue::String(String::from("Manger")))
+            Value::from("Manger")
         );
         assert_eq!(
             st.params[1],
-            Some(ParamValue::String(String::from("Chier")))
+            Value::from("Chier")
         );
-        assert_eq!(st.params[2], Some(ParamValue::I32(42)));
-        assert_eq!(st.params[3], Some(ParamValue::F64(42.0)));
-        assert_eq!(st.params[4], Some(ParamValue::Blob(vec![b'a', b'r', b'f'])));
+        assert_eq!(st.params[2], Value::I32(42));
+        assert_eq!(st.params[3], Value::F64(42.0));
+        assert_eq!(st.params[4], Value::Blob(vec![b'a', b'r', b'f']));
     }
 
     #[test]
@@ -82,21 +81,19 @@ mod tests {
         let mut st = Statement::new(":owner, :name, :name");
         st.set_param("owner", "DIO");
         st.set_param("name", "ZA WARUDO");
-        assert_eq!(st.params[0], Some(ParamValue::String(String::from("DIO"))));
+        assert_eq!(st.params[0], Value::from("DIO"));
         assert_eq!(
             st.params[1],
-            Some(ParamValue::String(String::from("ZA WARUDO")))
+            Value::from("ZA WARUDO")
         );
 
         let params: Vec<&dyn ToSql> = st
             .params
             .iter()
-            .map(|param| match param {
-                None => &Null {} as &dyn ToSql,
-                Some(param) => param as &dyn ToSql,
-            })
+            .map(|v| v as &dyn ToSql)
             .collect();
-        let text = generate_query(&st.query, params.iter().map(|p| *p));
+        let mut text = String::new();
+        generate_query(&mut text, &st.query, params.iter().map(|p| *p)).unwrap();
 
         let expected = "'DIO', 'ZA WARUDO', 'ZA WARUDO'";
         assert_eq!(expected, text);

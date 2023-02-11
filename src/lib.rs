@@ -2,22 +2,19 @@ pub mod column_id;
 pub(crate) mod command;
 pub mod connection;
 pub mod error;
-pub mod null;
-pub mod param_value;
 pub mod result_set;
 pub mod statement;
 pub mod to_sql;
 pub mod util;
 pub mod value;
+pub(crate) mod cs_context;
 
 pub use column_id::ColumnId;
 pub use connection::{Connection,TdsVersion};
 pub use error::Error;
-pub use null::NULL;
 pub use result_set::ResultSet;
 use to_sql::ToSql;
 pub type Result<T, E = error::Error> = core::result::Result<T, E>;
-pub use param_value::ParamValue;
 pub use rust_decimal::Decimal;
 pub use statement::Statement;
 pub use value::Value;
@@ -145,36 +142,45 @@ pub(crate) fn parse_query(text: impl AsRef<str>) -> ParsedQuery {
     ParsedQuery { pieces, params }
 }
 
-pub(crate) fn generate_query<'a, I>(query: &ParsedQuery, mut params: I) -> String
+pub(crate) fn generate_query<'a, I>(f: &mut dyn std::fmt::Write, query: &ParsedQuery, mut params: I) -> std::fmt::Result
 where
     I: Iterator<Item = &'a dyn ToSql>,
 {
-    let mut result = String::new();
     for piece in &query.pieces {
-        result.push_str(&match piece {
-            TextPiece::Literal(s) => s.to_string(),
-            TextPiece::Placeholder => match params.next() {
-                Some(value) => value.to_sql(),
-                None => "null".to_string(),
+        match piece {
+            TextPiece::Literal(s) => f.write_str(s)?,
+            TextPiece::Placeholder => {
+                match params.next() {
+                    Some(value) => value.to_sql(f)?,
+                    None => f.write_str("null")?,
+                }
             },
-        });
+        }
     }
-    result
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use crate::{parse_query, Connection, TextPiece, connection::TdsVersion};
-    const SERVER: &str = "***REMOVED***";
 
-    fn connect() -> Connection {
+    pub fn get_test_server() -> (String,u16) {
+        let server = std::fs::read_to_string("test-server.txt").unwrap().trim().to_string();
+        let tokens: Vec<&str> = server.split(':').collect();
+        (
+            tokens.get(0).unwrap().to_string(),
+            u16::from_str_radix(tokens.get(1).unwrap(), 10).unwrap()
+        )
+    }
+
+    pub fn connect() -> Connection {
+        let (server, port) = get_test_server();
         Connection::builder()
-            .host(SERVER)
-            .port(2025)
-            .client_charset("UTF-8")
+            .host(&server)
+            .port(port)
             .username("sa")
             .password("")
-            .database("master")
+            .client_charset("UTF-8")
             .tds_version(TdsVersion::Tds50)
             .login_timeout(5)
             .timeout(5)
