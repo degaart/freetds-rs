@@ -126,6 +126,12 @@ impl From<&[i8]> for Value {
     }
 }
 
+impl From<bool> for Value {
+    fn from(value: bool) -> Self {
+        Self::I32(if value { 1 } else { 0 })
+    }
+}
+
 impl<T> From<&T> for Value
 where
     T: Into<Value> + Clone
