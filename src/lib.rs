@@ -11,7 +11,7 @@ pub mod value;
 pub use column_id::ColumnId;
 pub use connection::{Connection,TdsVersion};
 pub use error::Error;
-pub use result_set::ResultSet;
+pub use result_set::{ResultSet, ResultType};
 use to_sql::ToSql;
 pub type Result<T, E = error::Error> = core::result::Result<T, E>;
 pub use rust_decimal::Decimal;

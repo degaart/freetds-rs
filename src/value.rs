@@ -2,10 +2,11 @@
 use std::fmt::{Display, Formatter, Write};
 use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 use rust_decimal::Decimal;
-
+use serde::{Serialize, Deserialize};
 use crate::to_sql::ToSql;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
 pub enum Value {
     Null,
     String(String),

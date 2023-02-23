@@ -34,6 +34,14 @@ impl Rows {
     }
 }
 
+#[derive(PartialEq)]
+pub enum ResultType {
+    None,
+    Rows,
+    Status,
+    UpdateCount,
+}
+
 pub(crate) enum SybResult {
     Rows(Rows),
     Status(i32),
@@ -78,6 +86,33 @@ impl ResultSet {
         }
 
         self.pos.expect("Unexpected None value") < self.results.len()
+    }
+
+    pub fn next_results_of_type(&mut self, type_: ResultType) -> bool {
+        if !self.next_results() {
+            return false;
+        }
+
+        while self.result_type() != type_ {
+            if !self.next_results() {
+                return false;
+            }
+        }
+        true
+    }
+
+    pub fn result_type(&self) -> ResultType {
+        match self.pos {
+            None => ResultType::None,
+            Some(pos) => match self.results.get(pos) {
+                None => ResultType::None,
+                Some(r) => match r {
+                    SybResult::Rows(_) => ResultType::Rows,
+                    SybResult::Status(_) => ResultType::Status,
+                    SybResult::UpdateCount(_) => ResultType::UpdateCount,
+                }
+            }
+        }
     }
 
     /*
