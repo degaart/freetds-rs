@@ -42,6 +42,7 @@ pub enum ResultType {
     UpdateCount,
 }
 
+#[derive(Debug)]
 pub(crate) enum SybResult {
     Rows(Rows),
     Status(i32),
@@ -232,7 +233,7 @@ impl ResultSet {
      */
     pub fn column_count(&mut self) -> Result<usize> {
         if self.pos.is_none() {
-            if !self.next_row_result().is_none() {
+            if self.next_row_result().is_none() {
                 return Err(Error::from_message("Query did not return rows"));
             }
         }
@@ -254,7 +255,7 @@ impl ResultSet {
 
     pub fn column_name(&mut self, index: usize) -> Result<String> {
         if self.pos.is_none() {
-            if !self.next_row_result().is_none() {
+            if self.next_row_result().is_none() {
                 return Err(Error::from_message("Query did not return rows"));
             }
         }

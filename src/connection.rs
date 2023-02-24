@@ -1284,6 +1284,7 @@ mod tests {
         assert_eq!(0, rs.status().unwrap());
 
         assert!(!rs.next_results());
+
     }
 
     #[test]
