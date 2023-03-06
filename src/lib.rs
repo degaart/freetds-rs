@@ -17,6 +17,7 @@ pub type Result<T, E = error::Error> = core::result::Result<T, E>;
 pub use rust_decimal::Decimal;
 pub use statement::Statement;
 pub use value::Value;
+pub use chrono::{NaiveDate, NaiveTime, NaiveDateTime};
 
 #[derive(PartialEq, Debug, Clone)]
 pub(crate) enum TextPiece {
