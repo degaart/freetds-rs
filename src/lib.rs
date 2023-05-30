@@ -277,4 +277,17 @@ mod tests {
         assert_eq!("\'ab\'", rs.get_string(0).unwrap().unwrap());
         assert_eq!("\'cd\'", rs.get_string(1).unwrap().unwrap());
     }
+
+    #[test]
+    fn test_error_handling() {
+        let mut conn = connect();
+        conn.execute("delete from DBSUIVI..FCLM where CLMEMAIL='das@das.com'", &[]).unwrap();
+        conn.execute("insert into DBSUIVI..FCLM(CLM_CLCODE,CLMEMAIL) values('DT162', 'das@das.com')", &[]).unwrap();
+        let result = conn.execute("insert into DBSUIVI..FCLM(CLM_CLCODE,CLMEMAIL) values('DT162', 'das@das.com')", &[]);
+        assert!(result.is_err());
+        if let Err(e) = result {
+            dbg!(e);
+        }
+    }
+
 }

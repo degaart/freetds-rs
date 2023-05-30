@@ -553,10 +553,10 @@ impl Connection {
         }
 
         if failed {
-            if errors.is_empty() {
-                return Err(Error::from_message("Query execution resulted in error"));
+            if let Some(error) = Self::get_single_error(&errors) {
+                return Err(error);
             } else {
-                return Err(errors.last().unwrap().clone());
+                return Err(Error::from_message("Query execution resulted in error"));
             }
         }
 
@@ -624,10 +624,10 @@ impl Connection {
         }
 
         if failed {
-            if errors.is_empty() {
-                return Err(Error::from_message("Query execution resulted in error"));
+            if let Some(error) = Self::get_single_error(&errors) {
+                return Err(error);
             } else {
-                return Err(errors.last().unwrap().clone());
+                return Err(Error::from_message("Query execution resulted in error"));
             }
         }
 
@@ -807,6 +807,21 @@ impl Connection {
     pub fn clear_message_callback(&mut self) {
         self.conn.borrow_mut().msg_callback = None;
     }
+
+    fn get_single_error<'a>(errors: impl IntoIterator<Item = &'a Error>) -> Option<Error> {
+        let mut result: Option<Error> = None;
+        for err in errors.into_iter() {
+            if let Some(r) = &mut result {
+                if err.severity > (*r).severity {
+                    result = Some(err.clone());
+                }
+            } else {
+                result = Some(err.clone());
+            }
+        }
+        result
+    }
+
 }
 
 unsafe impl Send for Connection {}
